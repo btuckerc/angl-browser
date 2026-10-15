@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Run a command in a Mac-side copy of this working tree (the repo lives on nous; Swift,
+# WebKit and the signing identity live on the Mac). Syncs the tree first.
+# Usage: scripts/mac [-d NAME] COMMAND...      e.g. scripts/mac swift test
+#        NAME selects a separate build dir (default "main") so parallel builds don't collide.
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+name=main
+if [ "${1:-}" = "-d" ]; then name="$2"; shift 2; fi
+dest="Library/Caches/angl-build/$name"
+ssh mac "mkdir -p '$dest'"
+rsync -a --delete --exclude .git --exclude .build --exclude build --exclude Resources/lists \
+  "$root/" "mac:$dest/"
+ssh mac "cd '$dest' && export PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin && $*"

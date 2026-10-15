@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Run AnglCore unit tests on the Mac without compiling the executables (lets core work proceed
+# while the app or CLI is mid-change). Usage: scripts/test-core [-d NAME] [swift test args...]
+set -euo pipefail
+name=core
+if [ "${1:-}" = "-d" ]; then name="$2"; shift 2; fi
+stub='for t in angl angl-lists; do rm -rf Sources/$t && mkdir -p Sources/$t && echo "print(0)" > Sources/$t/main.swift; done'
+exec "$(dirname "$0")/mac" -d "$name" "$stub && swift test $*"

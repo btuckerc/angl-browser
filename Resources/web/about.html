@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <link rel="stylesheet" href="angl://theme.css">
+    <link rel="stylesheet" href="base.css">
+    <script defer src="common.js"></script>
+    <script defer src="about.js"></script>
+    <title>About · angl</title>
+  </head>
+  <body>
+    <main>
+      <div class="wordmark">angl</div>
+      <section>
+        <table id="info"></table>
+      </section>
+      <section id="problems" hidden>
+        <h2>Config problems</h2>
+        <ul></ul>
+      </section>
+      <section>
+        <h2>Profiles</h2>
+        <p class="muted">Each profile is its own angl instance with its own history, containers and snapshots.</p>
+        <div id="profiles"></div>
+        <div class="row"><input id="newProfile" placeholder="new profile name"><button id="createProfile">Create and open</button></div>
+      </section>
+      <section>
+        <h2>Import</h2>
+        <div class="row">
+          <button data-import="safari">Safari bookmarks</button>
+          <button data-import="chrome">Chrome bookmarks + history</button>
+          <button data-import="html">Bookmarks file…</button>
+          <button data-import="search">Open tabs from Search</button>
+        </div>
+      </section>
+      <section>
+        <h2>Keys</h2>
+        <p class="muted">Rebind in <code>keys.json</code>: <code>{"tab.new": "cmd+t"}</code>.</p>
+        <table id="keys"></table>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,7 @@
+module CBitwarden [system] {
+    header "angl_bitwarden.h"
+    link "angl_bitwarden"
+    link framework "Security"
+    link framework "SystemConfiguration"
+    export *
+}

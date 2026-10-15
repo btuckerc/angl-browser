@@ -1,0 +1,47 @@
+# angl's bridge to the official Bitwarden SDK (sdk-internal): vault crypto only, behind a
+# four-function C ABI. HTTP stays in Swift. Built by scripts/bitwarden.sh with
+# `--cfg bitwarden_ensure_non_commercial`, so only the GPL-3.0 licensed SDK crates can link.
+[package]
+name = "angl-bitwarden"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+bitwarden-api-api = { git = "https://github.com/bitwarden/sdk-internal", rev = "c899f40c57ec5f258c37113b34bf67c8260898c4" }
+bitwarden-core = { git = "https://github.com/bitwarden/sdk-internal", rev = "c899f40c57ec5f258c37113b34bf67c8260898c4", features = ["internal"] }
+bitwarden-crypto = { git = "https://github.com/bitwarden/sdk-internal", rev = "c899f40c57ec5f258c37113b34bf67c8260898c4" }
+bitwarden-vault = { git = "https://github.com/bitwarden/sdk-internal", rev = "c899f40c57ec5f258c37113b34bf67c8260898c4" }
+# Multi-lane Argon2id (the SDK's mobile builds enable this too).
+argon2 = { version = "=0.6.0-rc.8", features = ["parallel"] }
+pollster = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(bitwarden_ensure_non_commercial)'] }
+
+# Mirrors the SDK's release profile: small, with the hot crypto crates built for speed.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+
+[profile.release.package.bitwarden-crypto]
+opt-level = 3
+[profile.release.package.aes]
+opt-level = 3
+[profile.release.package.cbc]
+opt-level = 3
+[profile.release.package.argon2]
+opt-level = 3
+[profile.release.package.blake2]
+opt-level = 3
+[profile.release.package.hmac]
+opt-level = 3
+[profile.release.package.sha2]
+opt-level = 3

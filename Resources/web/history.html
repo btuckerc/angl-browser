@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <link rel="stylesheet" href="angl://theme.css">
+    <link rel="stylesheet" href="base.css">
+    <script defer src="common.js"></script>
+    <script defer src="history.js"></script>
+    <title>History · angl</title>
+  </head>
+  <body>
+    <main class="wide">
+      <div class="row">
+        <h1 style="flex:1;margin:0">History</h1>
+        <div class="actions end" id="history-actions">
+          <span class="muted" style="align-self:center">clear</span>
+          <button data-range="hour">last hour</button>
+          <button data-range="day">last 24 hours</button>
+          <button data-range="week">last 7 days</button>
+          <button data-range="all" class="danger">everything</button>
+        </div>
+        <button id="clear-recovery" class="danger" hidden>Clear all</button>
+      </div>
+      <div class="row">
+        <button data-kind="history">History</button>
+        <button data-kind="archived">Archive</button>
+        <button data-kind="closed">Closed</button>
+        <input id="filter" placeholder="Search…" autofocus style="flex:1">
+      </div>
+      <table class="grid list">
+        <thead><tr><th style="width:110px">Date</th><th>Page</th><th style="width:60px" class="num">Visits</th><th style="width:150px"></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="muted" id="empty" hidden></p>
+      <div class="actions"><button id="more" hidden>More</button></div>
+    </main>
+  </body>
+</html>
