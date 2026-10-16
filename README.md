@@ -122,7 +122,9 @@ ticket. Tags are `vVERSION` and match `VERSION`.
   pick *Self-hosted* in the login sheet and enter its address) and Apple Passwords. On a
   sign-in page a picker drops under the field — *Log in to Bitwarden…* / *Unlock Bitwarden…*,
   then the logins matching the frame's site (Bitwarden's URI match rules and equivalent
-  domains); ↑ ↓ ↩ esc work while it is up. **⌘\\** offers logins on demand. Picking fills
+  domains). Past eight logins the list scrolls (*Apple Passwords…* stays pinned below it), and
+  typing in the username field narrows it by name or username; ↑ ↓ ↩ esc work while it is
+  up. **⌘\\** offers logins on demand. Picking fills
   username and password (never submits), asks for the master password first on re-prompt
   logins, and copies the TOTP code if there is one (**Copy one-time code after filling** turns
   that off). Two-step login takes authenticator, email and YubiKey OTP codes; for Duo or

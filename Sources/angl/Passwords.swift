@@ -22,6 +22,9 @@ final class Passwords: NSObject {
         let field: String
         let document: String
         var anchor: NSRect
+        /// A username field narrows the logins by what's typed in it; a password field never reports its text.
+        let filters: Bool
+        var query: String
     }
 
     private lazy var bitwarden: Bitwarden = {
@@ -134,7 +137,8 @@ final class Passwords: NSObject {
             let frameURL = message.frameInfo.request.url
             let url = frameURL?.host() == o.host ? frameURL! : URL(string: origin + "/")!
             let anchor = anchorRect(r, exact: body["exact"] as? Bool ?? false, in: wv)
-            let t = Target(tab: tab, frame: message.frameInfo, origin: origin, url: url, field: field, document: document, anchor: anchor)
+            let t = Target(tab: tab, frame: message.frameInfo, origin: origin, url: url, field: field, document: document, anchor: anchor,
+                           filters: body["kind"] as? String == "user", query: body["query"] as? String ?? "")
             if let cur = target, cur.field == field, cur.document == document, picker != nil { target = t; picker?.anchor(below: anchor); return }
             target = t
             show(for: t)
@@ -142,6 +146,11 @@ final class Passwords: NSObject {
             guard target?.document == document else { return }
             if body["remember"] as? Bool == true { dismissed.append(document); if dismissed.count > 64 { dismissed.removeFirst() } }
             closePicker()
+        case "query":
+            guard var t = target, picker != nil, t.document == document, t.filters, t.field == body["field"] as? String else { return }
+            t.query = body["query"] as? String ?? ""
+            target = t
+            show(for: t)
         case "key":
             guard target?.document == document, let picker, let key = body["key"] as? String else { return }
             switch key {
@@ -169,7 +178,22 @@ final class Passwords: NSObject {
             case .unlocked:
                 bitwarden.refresh()
                 let found = bitwarden.index?.matches(for: t.url) ?? []
-                rows = found.isEmpty ? [.note("No saved logins for this site")] : found.map(Row.login)
+                let q = t.query.trimmingCharacters(in: .whitespacesAndNewlines)
+                var shown = q.isEmpty ? found : found.filter { $0.username.localizedCaseInsensitiveContains(q) || $0.name.localizedCaseInsensitiveContains(q) }
+                if shown.isEmpty, !found.isEmpty {
+                    // Typed past every login: get out of the way (↩ submits the form, not a picker row).
+                    // Asked for (⌘\, a focus) over text that matches nothing: offer them all.
+                    if picker != nil { closePicker(); return }
+                    shown = found
+                }
+                if found.isEmpty {
+                    rows = [.note("No saved logins for this site")]
+                } else {
+                    if shown.count == found.count, t.filters, found.count > PasswordPicker.visibleRows {
+                        rows = [.note("\(found.count) logins · type to narrow")]
+                    }
+                    rows += shown.map(Row.login)
+                }
             }
         }
         if settings.applePasswords { rows.append(.apple) }
@@ -686,11 +710,15 @@ private final class ServerField: NSObject {
 
 // MARK: - Picker
 
-/// A flat list under the sign-in field. Non-activating: the page keeps focus, so typing continues
-/// and passwords.js forwards ↑ ↓ ↩ esc while the picker is up.
+/// A list under the sign-in field. Logins scroll past `visibleRows` (fewer on a short screen);
+/// a trailing Apple Passwords row stays pinned below them. Non-activating: the page keeps focus,
+/// so typing continues (narrowing a username field's logins) and passwords.js forwards ↑ ↓ ↩ esc.
 @MainActor
 private final class PasswordPicker: NSPanel {
+    static let visibleRows = 8
     private let list: PickerList
+    private var field = NSRect.zero
+    private var width: CGFloat = 300
 
     init(style: Style, action: @escaping (Row) -> Void) {
         list = PickerList(style: style, action: action)
@@ -708,41 +736,67 @@ private final class PasswordPicker: NSPanel {
     override var canBecomeMain: Bool { false }
 
     func set(rows: [Row], width: CGFloat) {
+        self.width = width
         list.rows = rows
-        setContentSize(NSSize(width: width, height: list.height))
+        place()
     }
 
     func anchor(below field: NSRect) {
-        var origin = NSPoint(x: field.minX, y: field.minY - frame.height - 4)
-        if let screen = parent?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame {
-            if origin.y < screen.minY { origin.y = field.maxY + 4 }
-            origin.x = min(max(origin.x, screen.minX), screen.maxX - frame.width)
-        }
-        setFrameOrigin(origin)
+        self.field = field
+        place()
+    }
+
+    /// Below the field when it fits, else on the roomier side; the scrolling band shrinks to fit.
+    private func place() {
+        let screen = parent?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? field.insetBy(dx: -4000, dy: -4000)
+        let below = field.minY - screen.minY - 4, above = screen.maxY - field.maxY - 4
+        var visible = min(list.split, Self.visibleRows)
+        while visible > 1, list.height(visible: visible) > max(below, above) { visible -= 1 }
+        list.visible = visible
+        let size = NSSize(width: width, height: list.height(visible: visible))
+        let y = size.height <= below || below >= above ? field.minY - size.height - 4 : field.maxY + 4
+        let x = min(max(field.minX, screen.minX), screen.maxX - size.width)
+        setFrame(NSRect(origin: NSPoint(x: x, y: y), size: size), display: true)
     }
 
     func move(_ d: Int) { list.move(d) }
     func activate() { list.activate() }
 }
 
+/// The picker's rows. Logins scroll inside their band (wheel or trackpad, or following the
+/// keyboard selection); a trailing Apple Passwords row is pinned below a hairline.
 @MainActor
 private final class PickerList: NSView {
     static let rowH: CGFloat = 30
     let style: Style
     let action: (Row) -> Void
     var rows: [Row] = [] {
-        didSet { selected = rows.firstIndex(where: \.selectable) ?? -1; needsDisplay = true; rebuildAccessibility() }
+        didSet {
+            if case .apple? = rows.last { split = rows.count - 1 } else { split = rows.count }
+            offset = 0
+            selected = rows.firstIndex(where: \.selectable) ?? -1
+            needsDisplay = true
+            rebuildAccessibility()
+        }
     }
+    /// rows[..<split] scroll; rows[split...] are pinned.
+    private(set) var split = 0
+    /// Scrolling rows shown at once; the picker fits it to the screen.
+    var visible = 0 {
+        didSet { offset = clamp(offset); needsDisplay = true; layoutAccessibility() }
+    }
+    /// How far the scrolling band is scrolled, in points.
+    private var offset: CGFloat = 0
     private var selected = -1 {
         didSet {
+            guard selected != oldValue else { return }
             needsDisplay = true
             for (i, e) in axRows.enumerated() { e.setAccessibilitySelected(i == selected) }
             NSAccessibility.post(element: self, notification: .selectedChildrenChanged)
         }
     }
-    /// VoiceOver sees one row element per drawn row; kept here because AX doesn't retain them.
+    /// VoiceOver sees one row element per row; kept here because AX doesn't retain them.
     private var axRows: [NSAccessibilityElement] = []
-    var height: CGFloat { CGFloat(max(rows.count, 1)) * Self.rowH + 2 }
 
     init(style: Style, action: @escaping (Row) -> Void) {
         self.style = style; self.action = action
@@ -753,14 +807,48 @@ private final class PickerList: NSView {
     override var isFlipped: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    // MARK: Geometry
+
+    private var bandH: CGFloat { CGFloat(visible) * Self.rowH }
+    private var band: NSRect { NSRect(x: 1, y: 1, width: bounds.width - 2, height: bandH) }
+    private var hairline: Bool { visible > 0 && split < rows.count }
+    private var pinnedTop: CGFloat { 1 + bandH + (hairline ? 1 : 0) }
+    private var contentH: CGFloat { CGFloat(split) * Self.rowH }
+
+    /// Panel height with `v` scrolling rows showing.
+    func height(visible v: Int) -> CGFloat {
+        let pinned = rows.count - split
+        return max(CGFloat(v + pinned) * Self.rowH + (v > 0 && pinned > 0 ? 1 : 0) + 2, Self.rowH + 2)
+    }
+
+    private func clamp(_ y: CGFloat) -> CGFloat { min(max(0, y), max(0, contentH - bandH)) }
+
+    private func rowRect(_ i: Int) -> NSRect {
+        let y = i < split ? 1 + CGFloat(i) * Self.rowH - offset : pinnedTop + CGFloat(i - split) * Self.rowH
+        return NSRect(x: 1, y: y, width: bounds.width - 2, height: Self.rowH)
+    }
+
+    private func index(at event: NSEvent) -> Int {
+        let p = convert(event.locationInWindow, from: nil)
+        if band.contains(p) { return Int((p.y - 1 + offset) / Self.rowH) }
+        let i = p.y >= pinnedTop ? split + Int((p.y - pinnedTop) / Self.rowH) : -1
+        return i < rows.count ? i : -1
+    }
+
+    private func scroll(to y: CGFloat) {
+        let next = clamp(y)
+        guard next != offset else { return }
+        offset = next
+        needsDisplay = true
+        layoutAccessibility()
+    }
+
+    // MARK: Input
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
         addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseMoved, .activeAlways, .inVisibleRect], owner: self))
-    }
-
-    private func index(at event: NSEvent) -> Int {
-        Int((convert(event.locationInWindow, from: nil).y - 1) / Self.rowH)
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -775,17 +863,29 @@ private final class PickerList: NSView {
         activate()
     }
 
+    override func scrollWheel(with event: NSEvent) {
+        guard contentH > bandH else { return }
+        scroll(to: offset - (event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * Self.rowH))
+        mouseMoved(with: event)
+    }
+
     func move(_ d: Int) {
         let choices = rows.indices.filter { rows[$0].selectable }
         guard !choices.isEmpty else { return }
         let at = choices.firstIndex(of: selected) ?? 0
         selected = choices[(at + d + choices.count) % choices.count]
+        guard selected < split else { return }
+        // Back at the first choice: show the top (a note above it) too.
+        let top = selected == choices.first ? 0 : CGFloat(selected) * Self.rowH
+        if top < offset { scroll(to: top) } else if top + Self.rowH > offset + bandH { scroll(to: top + Self.rowH - bandH) }
     }
 
     func activate() {
         guard rows.indices.contains(selected) else { return }
         action(rows[selected])
     }
+
+    // MARK: Accessibility
 
     private func rebuildAccessibility() {
         axRows = rows.enumerated().map { index, row in
@@ -795,47 +895,65 @@ private final class PickerList: NSView {
             e.setAccessibilityRole(.row)
             e.setAccessibilityLabel([title, detail].filter { !$0.isEmpty }.joined(separator: ", "))
             e.setAccessibilityParent(self)
-            e.setAccessibilityFrameInParentSpace(rowRect(index))
             e.setAccessibilitySelected(index == selected)
             return e
         }
+        layoutAccessibility()
         setAccessibilityElement(true)
         setAccessibilityRole(.list)
         setAccessibilityChildren(axRows)
         NSAccessibility.post(element: self, notification: .layoutChanged)
     }
 
-    private func rowRect(_ index: Int) -> NSRect {
-        NSRect(x: 1, y: 1 + CGFloat(index) * Self.rowH, width: bounds.width - 2, height: Self.rowH)
+    private func layoutAccessibility() {
+        for (i, e) in axRows.enumerated() { e.setAccessibilityFrameInParentSpace(rowRect(i)) }
     }
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        for (i, e) in axRows.enumerated() { e.setAccessibilityFrameInParentSpace(rowRect(i)) }
+        layoutAccessibility()
     }
+
+    // MARK: Drawing
 
     override func draw(_ dirtyRect: NSRect) {
         style.raised.setFill(); bounds.fill()
         style.border.setStroke()
         let edge = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5)); edge.lineWidth = 1; edge.stroke()
-        for (i, row) in rows.enumerated() {
-            let r = NSRect(x: 1, y: 1 + CGFloat(i) * Self.rowH, width: bounds.width - 2, height: Self.rowH)
-            if i == selected {
-                style.selected.setFill(); r.fill()
-                style.accent.setFill(); NSRect(x: r.minX, y: r.minY, width: 2, height: r.height).fill()
+        if visible > 0 {
+            NSGraphicsContext.saveGraphicsState()
+            band.clip()
+            for i in 0..<split where rowRect(i).intersects(band) { drawRow(i) }
+            if contentH > bandH {
+                // Overlay scroll indicator: always shown while there is more to scroll to.
+                let h = max(bandH * bandH / contentH, 16)
+                let y = band.minY + (bandH - h) * offset / (contentH - bandH)
+                style.muted.setFill()
+                NSBezierPath(roundedRect: NSRect(x: band.maxX - 5, y: y + 2, width: 3, height: h - 4), xRadius: 1.5, yRadius: 1.5).fill()
             }
-            let (title, detail) = row.labels
-            let color = switch row { case .login: style.primary; case .note: style.muted; default: style.accent }
-            let font = style.monoSmall
-            let detailAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: style.secondary]
-            let detailW = detail.isEmpty ? 0 : min((detail as NSString).size(withAttributes: detailAttrs).width, r.width * 0.5)
-            let para = NSMutableParagraphStyle(); para.lineBreakMode = .byTruncatingTail
-            let titleRect = NSRect(x: r.minX + 12, y: r.midY - font.pointSize * 0.65, width: r.width - 24 - (detailW > 0 ? detailW + 12 : 0), height: font.pointSize * 1.4)
-            (title as NSString).draw(in: titleRect, withAttributes: [.font: font, .foregroundColor: color, .paragraphStyle: para])
-            if detailW > 0 {
-                let dr = NSRect(x: r.maxX - 12 - detailW, y: titleRect.minY, width: detailW, height: titleRect.height)
-                (detail as NSString).draw(in: dr, withAttributes: detailAttrs.merging([.paragraphStyle: para]) { $1 })
-            }
+            NSGraphicsContext.restoreGraphicsState()
+        }
+        if hairline { style.border.setFill(); NSRect(x: 1, y: pinnedTop - 1, width: bounds.width - 2, height: 1).fill() }
+        for i in split..<rows.count { drawRow(i) }
+    }
+
+    private func drawRow(_ i: Int) {
+        let r = rowRect(i), row = rows[i]
+        if i == selected {
+            style.selected.setFill(); r.fill()
+            style.accent.setFill(); NSRect(x: r.minX, y: r.minY, width: 2, height: r.height).fill()
+        }
+        let (title, detail) = row.labels
+        let color = switch row { case .login: style.primary; case .note: style.muted; default: style.accent }
+        let font = style.monoSmall
+        let detailAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: style.secondary]
+        let detailW = detail.isEmpty ? 0 : min((detail as NSString).size(withAttributes: detailAttrs).width, r.width * 0.5)
+        let para = NSMutableParagraphStyle(); para.lineBreakMode = .byTruncatingTail
+        let titleRect = NSRect(x: r.minX + 12, y: r.midY - font.pointSize * 0.65, width: r.width - 24 - (detailW > 0 ? detailW + 12 : 0), height: font.pointSize * 1.4)
+        (title as NSString).draw(in: titleRect, withAttributes: [.font: font, .foregroundColor: color, .paragraphStyle: para])
+        if detailW > 0 {
+            let dr = NSRect(x: r.maxX - 12 - detailW, y: titleRect.minY, width: detailW, height: titleRect.height)
+            (detail as NSString).draw(in: dr, withAttributes: detailAttrs.merging([.paragraphStyle: para]) { $1 })
         }
     }
 }

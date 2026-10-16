@@ -56,10 +56,12 @@
     } catch { exact = false; }
     return { rect: { x, y, width: r.width, height: r.height }, exact };
   };
+  // A username field's text narrows the picker; a password field's text is never sent.
   const report = (el, how) => {
     current = el;
     announced.add(el);
-    post({ type: 'field', field: token(el), ...rectOf(el), focused: how === 'focus', explicit: how === 'explicit' });
+    const user = !isPassword(el);
+    post({ type: 'field', field: token(el), ...rectOf(el), focused: how === 'focus', explicit: how === 'explicit', kind: user ? 'user' : 'password', query: user ? el.value : '' });
   };
 
   // Page loads / SPA steps: announce the first sign-in field once (username before password).
@@ -82,15 +84,20 @@
   // Focus offers logins only for empty fields (not after a fill, not over the page's own autofill).
   document.addEventListener('focusin', (e) => { if (!filling && loginField(e.target) && !e.target.value) report(e.target, 'focus'); }, true);
 
-  // While the picker is up: ↑ ↓ ↩ esc drive it; scrolling, clicking away or typing closes it.
+  // While the picker is up: ↑ ↓ ↩ esc drive it; typing in its username field narrows it;
+  // scrolling, clicking away, Tab or typing anywhere else closes it.
   const dismiss = (remember) => { if (shown) { shown = false; post({ type: 'dismiss', remember }); } };
+  const narrows = (e) => e.composedPath()[0] === current && current && !isPassword(current);
   document.addEventListener('keydown', (e) => {
     if (!shown || !e.isTrusted) return;
     if (['ArrowDown', 'ArrowUp', 'Enter', 'Escape'].includes(e.key)) {
       e.preventDefault(); e.stopImmediatePropagation();
       post({ type: 'key', key: e.key });
       if (e.key === 'Escape') shown = false;
-    } else if (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Tab') dismiss(false);
+    } else if (e.key === 'Tab' || ((e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete') && !narrows(e))) dismiss(false);
+  }, true);
+  document.addEventListener('input', (e) => {
+    if (shown && !filling && e.isTrusted && narrows(e)) post({ type: 'query', field: token(current), query: current.value });
   }, true);
   document.addEventListener('pointerdown', (e) => { if (e.target !== current) dismiss(false); }, true);
   addEventListener('scroll', () => dismiss(false), true);
