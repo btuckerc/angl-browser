@@ -912,7 +912,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func showFind() {
-        guard active?.webView != nil else { return }
+        guard let wv = active?.webView else { return }
+        // Settings searches its own settings rather than the page's text.
+        if let url = wv.url, url.scheme == InternalPages.scheme, url.host == "settings" {
+            focusContent()
+            wv.evaluateJavaScript("window.anglFocusSearch?.()")
+            return
+        }
         if focusMode { navForcedVisible = false }
         findBar.isHidden = false
         root.needsLayout = true

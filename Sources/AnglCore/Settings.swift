@@ -49,8 +49,9 @@ public struct Settings: Codable, Equatable, Sendable {
     }
 
     public struct Tabs: Codable, Equatable, Sendable {
-        /// Memory saver interval; zero disables idle unloading. Pins and active media are exempt.
-        public var unloadAfterMinutes: Double = 30
+        /// Memory saver interval; zero (the default) disables idle unloading. Pins and active media
+        /// are exempt, but an unloaded page loses whatever it hadn't saved (a half-written form).
+        public var unloadAfterMinutes: Double = 0
         public var autoArchive = false
         public var archiveAfterHours: Double = 24
         public var restoreOnLaunch = true
@@ -95,8 +96,8 @@ public struct Settings: Codable, Equatable, Sendable {
     }
 
     public struct Developer: Codable, Equatable, Sendable {
-        /// Web Inspector (Cmd-Opt-I) on every tab.
-        public var inspector = true
+        /// Web Inspector attachable to every tab; off, ⌘⌥I still makes the current tab inspectable.
+        public var inspector = false
     }
 
     public struct Passwords: Codable, Equatable, Sendable {
@@ -108,10 +109,12 @@ public struct Settings: Codable, Equatable, Sendable {
         public var applePasswords = true
         /// Show matching logins as soon as a sign-in field gets focus (⌘\ always works).
         public var suggestOnFocus = true
-        /// Lock the vault after this many idle minutes (0 = only on quit).
-        public var lockAfterMinutes: Double = 0
-        /// Copy a login's one-time code after filling its credentials.
-        public var copyTOTP = true
+        /// Lock the vault after this many minutes without vault use (0 = only on quit, sleep or
+        /// screen lock).
+        public var lockAfterMinutes: Double = 15
+        /// Copy a login's one-time code to the clipboard after filling its credentials (other apps
+        /// can read the clipboard, so it's opt-in).
+        public var copyTOTP = false
         /// Keep the vault's user key in the login keychain, released by Touch ID, across launches.
         public var rememberUnlock = false
     }
@@ -126,8 +129,11 @@ public struct Settings: Codable, Equatable, Sendable {
         public var animated = true
     }
 
+    /// Maps the user owns whole (a keyword removed from the defaults stays removed).
+    public static let atomicPaths: Set<String> = ["search.keywords"]
+
     public static func load(from url: URL) throws -> Settings {
-        try JSONFile.layered(Settings(), file: url)
+        try JSONFile.layered(Settings(), file: url, atomic: atomicPaths)
     }
 
     /// Expand a search template with a query.

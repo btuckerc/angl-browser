@@ -16,6 +16,8 @@ enum PageCommands {
                 "defaults": try json(Settings()),
                 "files": ["settings": b.paths.settingsFile.path, "theme": b.paths.themeFile.path,
                           "keys": b.paths.keysFile.path, "css": b.paths.cssDir.path],
+                // What this Mac's WebKit can do: No JIT needs macOS 26.4.
+                "capabilities": ["noJIT": noJIT],
             ]
         case "settings.set":
             let path = try string(args, "path")
@@ -223,6 +225,12 @@ enum PageCommands {
             "busy": blocker.busy,
             "error": blocker.problem ?? NSNull(),
         ]
+    }
+
+    /// WebKit's interpreter-only mode (`Hardening.noJIT`) exists from macOS 26.4.
+    private static var noJIT: Bool {
+        if #available(macOS 26.4, *) { return true }
+        return false
     }
 
     private static func reveal(_ file: String) {

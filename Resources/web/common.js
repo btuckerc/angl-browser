@@ -1,22 +1,38 @@
 // Shared page bridge and standalone preview data
 (() => {
+  // Mirrors AnglCore's Settings() so standalone previews render every control.
   const defaults = {
-    search: { engine: 'https://duckduckgo.com/?q=%s', keywords: { d: 'https://duckduckgo.com/?q=%s', g: 'https://google.com/search?q=%s' } },
-    content: { javascript: true, blockRemoteFonts: false, blocker: true, square: true, dark: 'off', zoom: 1, blockAutoplay: true },
-    tabs: { unloadAfterMinutes: 0, restoreOnLaunch: true },
-    privacy: { cleanURLs: true, safariUserAgent: true },
-    blocking: { lists: [{ id: 'easylist', name: 'EasyList', url: 'https://easylist.to/easylist/easylist.txt', enabled: true }], updateEveryDays: 7 },
-    engines: { rules: [] }, snapshots: { autoEveryMinutes: 10, keep: 20 }, developer: { inspector: true }
+    search: { engine: 'https://duckduckgo.com/?q=%s', keywords: { d: 'https://duckduckgo.com/?q=%s', g: 'https://www.google.com/search?q=%s', w: 'https://en.wikipedia.org/wiki/Special:Search?search=%s', yt: 'https://www.youtube.com/results?search_query=%s', gh: 'https://github.com/search?q=%s', k: 'https://kagi.com/search?q=%s' } },
+    content: { javascript: true, blockRemoteFonts: false, blocker: true, square: true, dark: 'off', zoom: 1, nightAudio: false, blockAutoplay: true, hardening: 'off' },
+    tabs: { unloadAfterMinutes: 0, autoArchive: false, archiveAfterHours: 24, restoreOnLaunch: true, routeByURL: true, favorites: false, splitView: false, closeWindowWithLastTab: true },
+    downloads: { folder: '~/Downloads' },
+    privacy: { cleanURLs: true, safariUserAgent: true, forgetOnQuit: false, keepSignedIn: ['google.com', 'youtube.com'] },
+    blocking: { lists: [
+      { id: 'adguard-base', name: 'AdGuard Base (Safari optimized)', url: 'https://filters.adtidy.org/extension/safari/filters/2_optimized.txt', enabled: true },
+      { id: 'adguard-tracking', name: 'AdGuard Tracking Protection (Safari optimized)', url: 'https://filters.adtidy.org/extension/safari/filters/3_optimized.txt', enabled: true },
+      { id: 'ubo-filters', name: 'uBlock filters', url: 'https://ublockorigin.github.io/uAssets/filters/filters.txt', enabled: false },
+      { id: 'annoyances-cookies', name: 'AdGuard Cookie Notices (Safari optimized)', url: 'https://filters.adtidy.org/extension/safari/filters/18_optimized.txt', enabled: false }
+    ], updateEveryDays: 7, advanced: true },
+    engines: { rules: [] }, snapshots: { autoEveryMinutes: 10, keep: 20 }, developer: { inspector: false },
+    passwords: { provider: 'bitwarden', server: 'bitwarden.com', applePasswords: true, suggestOnFocus: true, lockAfterMinutes: 15, copyTOTP: false, rememberUnlock: false },
+    twitch: { emotes: true, bttv: true, ffz: true, seventv: true, animated: true }
   };
   const clone = (value) => JSON.parse(JSON.stringify(value));
   let settings = clone(defaults);
+  const themeDefaults = {
+    color: { accent: '#55c3e8' },
+    window: { address: 'palette', newTab: 'field', caret: 'block', outline: 'none', outlineColor: 'accent', outlineCustomColor: '#55c3e8', outlineWidth: 0.5, outlineOpacity: 0.55, outlineInactiveOpacity: 0.15 },
+    sidebar: { mode: 'pinned', spaces: 'top', peekWidth: 10, peekDelayMs: 120, hideDelayMs: 400 }
+  };
+  const theme = clone(themeDefaults);
   let workspaceData = {
     containers: [{ id: 'default', name: 'Default', color: '#55c3e8', proxy: null, clearOnQuit: false }],
     workspaces: [{ id: 'personal', name: 'Personal', color: '#55c3e8', containerID: 'default', rules: [{ kind: 'host', value: 'example.com' }] }],
     palette: ['#55c3e8', '#a6e25f', '#ffdf6b', '#ff8eaf', '#e85b92']
   };
+  let mockAccount = { state: 'locked', email: 'you@example.com', server: 'bitwarden.com' };
   const mock = {
-    'settings.get': () => ({ settings, defaults, files: { settings: '~/config/angl/settings.json', theme: '~/config/angl/theme.json', keys: '~/config/angl/keys.json', css: '~/config/angl/css' } }),
+    'settings.get': () => ({ settings, defaults, capabilities: { noJIT: true }, files: { settings: '~/config/angl/settings.json', theme: '~/config/angl/theme.json', keys: '~/config/angl/keys.json', css: '~/config/angl/css' } }),
     'settings.set': ({ path, value }) => {
       const parts = path.split('.');
       let target = settings;
@@ -38,10 +54,18 @@
     'sites.set': () => ({}),
     'sites.reset': () => ({}),
     'blocking.status': () => ({ lists: settings.blocking.lists, rules: 125000, updated: new Date().toISOString(), busy: false, error: null }),
-    'blocking.update': () => mock['blocking.status'](),
-    'engines.list': () => ({ items: [{ id: 'duckduckgo', name: 'DuckDuckGo', family: 'duckduckgo', installed: true }, { id: 'google', name: 'Google', family: 'google', installed: true }] }),
-    'keys.list': () => ({ items: [{ command: 'newTab', title: 'New tab', chord: '⌘T' }, { command: 'closeTab', title: 'Close tab', chord: '⌘W' }] }),
-    'theme.get': () => ({ theme: {} }),
+    'blocking.update': () => ({ ...mock['blocking.status'](), busy: false }),
+    'engines.list': () => ({ items: [{ id: 'safari', name: 'Safari', family: 'webkit', installed: true }, { id: 'chrome', name: 'Google Chrome', family: 'chromium', installed: true }, { id: 'firefox', name: 'Firefox', family: 'gecko', installed: false }] }),
+    'keys.list': () => ({ items: [
+      { command: 'tab.new', title: 'New Tab', chord: '⌘T' }, { command: 'tab.close', title: 'Close Tab', chord: '⌘W' },
+      { command: 'app.settings', title: 'Settings…', chord: '⌘,' }, { command: 'find', title: 'Find', chord: '⌘F' },
+      { command: 'dev.inspector', title: 'Web Inspector', chord: '⌥⌘I' }, { command: 'passwords.fill', title: 'Fill Password', chord: '⌘\\' }
+    ] }),
+    'theme.get': () => ({ theme, defaults: themeDefaults }),
+    'passwords.login': () => { mockAccount = { state: 'unlocked', email: 'you@example.com', server: settings.passwords.server }; return mockAccount; },
+    'passwords.logout': () => { mockAccount = { state: 'loggedOut', email: null, server: settings.passwords.server }; return mockAccount; },
+    'theme.set': ({ path, value }) => { const [group, key] = path.split('.'); theme[group][key] = value; return { theme }; },
+    'theme.reset': ({ path }) => { const [group, key] = path.split('.'); theme[group][key] = themeDefaults[group][key]; return { theme }; },
     'snapshots.list': () => ({ items: [{ id: 's1', date: new Date().toISOString(), auto: true, windows: 1, workspaces: 1, tabs: 3 }] }),
     'containers.clearData': () => ({}),
     'history.query': ({ text = '', offset = 0, sort }) => {
@@ -62,7 +86,8 @@
       { id: 'r2', createdAt: new Date(Date.now() - 72e5).toISOString(), saved: {} },
       { id: 'r3', createdAt: new Date(Date.now() - 3 * 864e5).toISOString(), saved: { title: 'angl', url: 'https://github.com/btuckerc/angl' } }
     ].filter((item) => ((item.saved.title || '') + (item.saved.url || '')).toLowerCase().includes(text.toLowerCase())) }),
-    'config.reveal': () => ({})
+    'config.reveal': () => ({}),
+    'passwords.status': () => mockAccount
   };
 
   window.angl = {
@@ -71,7 +96,8 @@
         return Promise.resolve(window.webkit.messageHandlers.angl.postMessage({ cmd, args }));
       }
       console.log('[angl mock]', cmd, args);
-      try { return Promise.resolve(mock[cmd] ? mock[cmd](args) : {}); }
+      // Copies, like the native bridge's JSON replies: pages never share objects with the mock.
+      try { return Promise.resolve(clone(mock[cmd] ? mock[cmd](clone(args)) ?? {} : {})); }
       catch (error) { return Promise.reject(error); }
     }
   };

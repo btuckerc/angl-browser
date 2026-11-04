@@ -82,7 +82,7 @@ ticket. Tags are `vVERSION` and match `VERSION`.
   `"window": {"address": "bar"}`).
 - **Tabs** form a tree: links opened with ⌘-click, middle-click or `window.open` become
   children. ⌘⌥↑/↓ parent/child, ⌃Tab or ⌘⇧[ ] cycle, ⌘1…9, ⌘W closes (on the window's
-  last page, in every Space, it closes the window; Settings › Tabs turns that off),
+  last page, in every Space, it closes the window; Settings › Tabs & Spaces turns that off),
   ⌘⌥W closes with children, ⌘⇧T reopens the last closed tab (`a ` in the palette searches
   archived ones). Drag rows to re-parent; right-click for pin, duplicate, folders,
   Container and Space moves. Pinned tabs sit above the tree as titled rows. A speaker
@@ -95,28 +95,28 @@ ticket. Tags are `vVERSION` and match `VERSION`.
   its cookies and storage; its Spaces and tabs move to another). A new Space shares the current
   Container. Containers have separate cookies and storage, an optional HTTP/SOCKS5 proxy
   and clear-on-quit; a tab can override its Container from the site panel. URL rules move
-  matching sites into a Space (Settings › Tabs › Move matching tabs to Spaces).
-- **Settings › Tabs**, all optional: *Memory saver* unloads tabs idle for 30 minutes
-  (pins, playing media, camera/mic and visible panes exempt; 0 = off). *Auto-archive* (off) moves
-  tabs idle for 24 hours to History › Archive. *Favorites* (off) shows bookmarked
+  matching sites into a Space (Settings › Tabs & Spaces › Route tabs by URL).
+- **Settings › Tabs & Spaces**, all optional: *Unload after* (off by default; set
+  minutes) unloads idle tabs (pins, playing media, camera/mic and visible panes exempt). *Archive
+  inactive tabs* (off) moves tabs idle for 24 hours to History › Archive. *Favorites row* (off) shows bookmarked
   favourites as an icon row in every Space. *Split view* (off) shows two tabs of a Space side
   by side: ⌥⌘\\ picks the second tab or exits, ⌥⌘←/→ moves focus (the focused pane has an
   accent outline), drag the divider.
 - **Site controls** (⇧⌘I or the gear in the address pill): JavaScript (⇧⌘J), blocker, remote fonts,
   square corners (⇧⌘U), dark mode (⇧⌘D, off/auto/force), hardening, volume −30…0 dB,
   mute (⇧⌘M, the whole page including WebAudio), zoom.
-- **Night audio** (Settings › Pages › Media, off): compresses loud/quiet swings in Media Source
+- **Night audio** (Settings › Pages & media › Media, off): compresses loud/quiet swings in Media Source
   video (YouTube, Twitch) with Web Audio's `DynamicsCompressorNode` at FrankerFaceZ's defaults
   (threshold −50 dB, knee 40, ratio 12, release 0.25 s). WebKit outputs silence when a page routes
   MediaSource video through Web Audio (FFZ's approach), so a page script decodes the audio the
   site appends with WebCodecs, plays it compressed in sync with the video and turns the video's
   own audio track off. No permissions; everything stays in the page. Switching it on applies from
   the next page load; switching it off takes effect at once.
-- **Hardening** (Settings › Pages › WebKit security mode, or per site): `noJIT` runs JavaScript without the JIT
+- **Hardening** (Settings › Privacy & blocking › Security › WebKit restrictions, or per site): `noJIT` runs JavaScript without the JIT
   (macOS 26.4+), `lockdown` is WebKit Lockdown Mode. JavaScript itself stays on by default;
   switch it off globally or per site.
-- **Forget on quit** (Settings › Privacy): deletes every site's cookies and storage at quit
-  except the domains in *Keep signed in* (default google.com, youtube.com).
+- **Forget on quit** (Settings › Privacy & blocking › Site data, off): deletes every site's cookies and
+  storage at quit except the domains in *Except* (default google.com, youtube.com).
 - **Passwords** (Settings › Passwords): Bitwarden built in (the official Bitwarden SDK runs
   in-process; bitwarden.com, bitwarden.eu, or a self-hosted Bitwarden or Vaultwarden server —
   pick *Self-hosted* in the login sheet and enter its address) and Apple Passwords. Focusing a
@@ -132,13 +132,14 @@ ticket. Tags are `vVERSION` and match `VERSION`.
   name, username or site. Filling a login saved for another site asks first (*Fill Once*;
   the login isn't changed). Picking fills
   username and password (never submits), asks for the master password first on re-prompt
-  logins, and copies the TOTP code if there is one and the password was filled (**Copy
-  one-time code after filling** turns that off). Which login was last filled is kept per
+  logins, and, with **Copy one-time code after filling** (off by default), copies the TOTP code
+  if there is one and the password was filled. Which login was last filled is kept per
   profile (IDs and times only) for the ordering. Two-step login takes authenticator, email and YubiKey OTP codes; for Duo or
   security keys log in with a personal API key. The encrypted vault is cached in the profile,
   so unlocking works offline, and syncs when the server reports a change. Keys stay in memory
-  (with **Remember unlock**, also sealed to the Secure Enclave and opened by Touch ID or the
-  login password); Edit › Lock Bitwarden or idle/screen lock drops them from memory.
+  (with **Unlock with Touch ID**, also sealed to the Secure Enclave and opened by Touch ID or the
+  login password); Edit › Lock Bitwarden, 15 idle minutes (*Lock when idle for*), quit,
+  sleep or screen lock drops them from memory.
   *Apple Passwords…* opens a native sheet with the system AutoFill picker and
   fills what you choose there. Settings › Passwords turns either off.
 - **Passkeys** come from Bitwarden: a site's passkey sign-in or registration opens a native
@@ -150,11 +151,11 @@ ticket. Tags are `vVERSION` and match `VERSION`.
   (no passkey for the site, Bitwarden off, conditional registration) go to WebKit.
 - **Ad blocker**: AdGuard Base + Tracking Protection (Safari-optimized lists, converted
   by AdGuard's SafariConverterLib into WebKit content rules) plus AdGuard Scriptlets and
-  cosmetic rules for sites such as YouTube. Settings › Privacy › Content-blocking lists picks lists (toggling one
+  cosmetic rules for sites such as YouTube. Settings › Privacy & blocking › Filter lists picks lists (toggling one
   rebuilds), toggles the advanced rules; the site panel turns the blocker off per site.
   **AdGuard Cookie Notices** (off by default) hides consent banners and clicks some away —
   often "reject", sometimes "accept"; it goes off with the site's blocker.
-- **Twitch emotes**: BTTV, FFZ and 7TV emotes render in twitch.tv chat (Settings › Pages › Twitch chat:
+- **Twitch emotes**: BTTV, FFZ and 7TV emotes render in twitch.tv chat (Settings › Pages & media › Twitch chat:
   per provider, animated or still, or off).
 - **Focus mode** ⇧⌘\ hides the chrome; ⇧⌘L (or the sidebar button next to the traffic
   lights) hides the sidebar; hover the left edge to peek. Appearance sets the edge catch
@@ -169,6 +170,9 @@ ticket. Tags are `vVERSION` and match `VERSION`.
   `angl://snapshots` restores them. ⇧⌘O hands the page to another installed browser.
 - Pages: `angl://settings`, `spaces` (Spaces and Containers), `sites`, `history` (⌘Y), `downloads` (⌘⌥L),
   `snapshots`, `about` (profiles, import from Safari/Chrome/Search, keys).
+- **Settings** (⌘,) is one searchable page: ⌘F or / searches every label, description and value,
+  *Modified* shows only what differs from the defaults, and each row's ⋯ resets it and shows its
+  default. Web Inspector attaches only to tabs you open it on (⌥⌘I) unless *Inspectable tabs* is on.
 - **History** (⌘Y) lists visits newest first, grouped by day, with Archive and Closed tabs
   beside it. ↓ from the search box walks the rows, ⌫ forgets the focused one, ⎋ returns
   to search. The palette's `h ` filter ranks the same history by frecency instead.

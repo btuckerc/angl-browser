@@ -223,7 +223,7 @@ final class Browser {
 
     /// Write one settings value (dot path) into the user's partial settings.json.
     func setSetting(path: String, value: Any?) throws {
-        let s: Settings = try writeLayered(Settings(), file: paths.settingsFile, path: path, value: value)
+        let s: Settings = try writeLayered(Settings(), file: paths.settingsFile, path: path, value: value, atomic: Settings.atomicPaths)
         if s != settings { settings = s; post(.anglSettings) }
     }
 
@@ -234,13 +234,23 @@ final class Browser {
     }
 
     /// Set `path` in a partial user JSON file, validating the merged result before writing so a
-    /// bad value never lands on disk. Returns the decoded merged value.
-    private func writeLayered<T: Codable>(_ defaults: T, file: URL, path: String, value: Any?) throws -> T {
-        var user = (try? Data(contentsOf: file)).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any] ?? [:]
+    /// bad value never lands on disk. Returns the decoded merged value. A file that exists but
+    /// can't be read as a JSON object is left alone: rewriting it would drop every other override.
+    private func writeLayered<T: Codable>(_ defaults: T, file: URL, path: String, value: Any?, atomic: Set<String> = []) throws -> T {
+        var user: [String: Any] = [:]
+        if FileManager.default.fileExists(atPath: file.path) {
+            let existing = try Data(contentsOf: file)
+            if !existing.isEmpty {
+                guard let object = (try? JSONSerialization.jsonObject(with: existing)) as? [String: Any] else {
+                    throw PageCommands.Failure(message: "\(file.lastPathComponent) isn't valid JSON; fix it, then try again")
+                }
+                user = object
+            }
+        }
         user = setPath(user, path.split(separator: ".").map(String.init), value)
         let data = try JSONSerialization.data(withJSONObject: user, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
         let base = try JSONSerialization.jsonObject(with: JSONFile.encoder().encode(defaults))
-        let merged = try JSONSerialization.data(withJSONObject: JSONFile.merge(base, user))
+        let merged = try JSONSerialization.data(withJSONObject: JSONFile.merge(base, user, atomic: atomic))
         let decoded = try JSONFile.decoder().decode(T.self, from: merged)
         try FileManager.default.createDirectory(at: paths.configDir, withIntermediateDirectories: true)
         try data.write(to: file, options: .atomic)
