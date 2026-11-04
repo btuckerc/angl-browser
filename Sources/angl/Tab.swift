@@ -84,6 +84,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// Drop the web view, keeping enough state to come back where we were.
     func unload() {
         Passwords.shared.pageHidden(in: self)
+        PasskeyBridge.shared.documentGone(in: self)
         guard let wv = webView else { return }
         captureState()
         observers.removeAll()
@@ -434,6 +435,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
             favicon = Tab.storedFavicon(for: webView.url)
         }
         Passwords.shared.pageHidden(in: self)
+        PasskeyBridge.shared.documentGone(in: self)
         owner.tabChanged(self)
         owner.navigationCommitted(in: self)
     }

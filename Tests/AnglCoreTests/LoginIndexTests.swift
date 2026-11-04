@@ -62,11 +62,102 @@ final class LoginIndexTests: XCTestCase {
         XCTAssertTrue(matches([LoginIndex.URI("https://accounts.google.com")], "https://mail.google.com/"))
     }
 
-    func testMatchesSortByName() {
-        let a = LoginIndex.Login(id: "a", name: "item 10", username: "", hasTOTP: false, reprompt: false)
-        let b = LoginIndex.Login(id: "b", name: "Item 9", username: "", hasTOTP: false, reprompt: false)
-        let c = LoginIndex.Login(id: "c", name: "elsewhere", username: "", hasTOTP: false, reprompt: false)
-        let idx = LoginIndex([(a, [.init("example.com")]), (b, [.init("example.com")]), (c, [.init("other.com")])])
-        XCTAssertEqual(idx.matches(for: URL(string: "https://example.com/")!).map(\.id), ["b", "a"])
+    private func login(_ id: String, _ name: String, _ username: String = "", favorite: Bool = false) -> LoginIndex.Login {
+        LoginIndex.Login(id: id, name: name, username: username, hasTOTP: false, reprompt: false, favorite: favorite)
+    }
+
+    private func ranked(_ idx: LoginIndex, _ page: String, _ ranking: LoginIndex.Ranking = .init()) -> [String] {
+        idx.matches(for: URL(string: page)!, ranking: ranking).map(\.login.id)
+    }
+
+    func testThisHostOutranksSiblingServicesOnTheSameDomain() {
+        let idx = LoginIndex([
+            (login("gitea", "Gitea"), [.init("https://git.example.com")]),
+            (login("mail", "Mail"), [.init("example.com")]),
+            (login("grafana", "Grafana"), [.init("https://grafana.example.com/login")]),
+            (login("www", "Grafana www"), [.init("https://www.grafana.example.com")]),
+            (login("port", "Grafana alt port"), [.init("https://grafana.example.com:3000")]),
+        ])
+        let found = idx.matches(for: URL(string: "https://grafana.example.com/login")!)
+        XCTAssertEqual(found.map(\.login.id), ["grafana", "port", "www", "gitea", "mail"])
+        XCTAssertEqual(found.map(\.tier), [.host, .nearHost, .nearHost, .domain, .domain])
+        XCTAssertEqual(found.map(\.host), ["grafana.example.com", "grafana.example.com:3000", "www.grafana.example.com", "git.example.com", "example.com"])
+    }
+
+    func testALoginRanksByItsBestMatchingURI() {
+        let idx = LoginIndex([
+            (login("a", "A"), [.init("https://other.example.com")]),
+            (login("b", "B"), [.init("https://other.example.com"), .init("https://app.example.com", rule: .host), .init("https://app.example.com", rule: .never)]),
+        ])
+        XCTAssertEqual(ranked(idx, "https://app.example.com/"), ["b", "a"])
+    }
+
+    func testRulesWithoutThisHostRankBetweenNearHostsAndSiblings() {
+        let idx = LoginIndex([
+            (login("sibling", "Sibling"), [.init("https://www.example.com")]),
+            (login("regex", "Regex"), [.init(#"^https://[a-z]+\.example\.com/"#, rule: .regularExpression)]),
+            (login("prefix", "Prefix"), [.init("https://app.example.com/sign", rule: .startsWith)]),
+        ])
+        let found = idx.matches(for: URL(string: "https://app.example.com/sign-in")!)
+        XCTAssertEqual(found.map(\.login.id), ["prefix", "regex", "sibling"])
+        XCTAssertEqual(found.map(\.tier), [.host, .rule, .domain])
+    }
+
+    func testEquivalentDomainsRankLast() {
+        let idx = LoginIndex([
+            (login("eq", "Equivalent"), [.init("https://youtube.com")]),
+            (login("sib", "Sibling"), [.init("https://mail.google.com")]),
+        ], equivalentDomains: [["google.com", "youtube.com"]])
+        let found = idx.matches(for: URL(string: "https://accounts.google.com/")!)
+        XCTAssertEqual(found.map(\.login.id), ["sib", "eq"])
+        XCTAssertEqual(found.last?.tier, .equivalent)
+    }
+
+    func testWithinATierShownUsernameThenLastUseThenFavoriteThenName() {
+        let uri = [LoginIndex.URI("https://example.com")]
+        let idx = LoginIndex([
+            (login("b", "Item 9", "bob"), uri), (login("a", "item 10", "amy"), uri),
+            (login("fav", "Zed", "zed", favorite: true), uri), (login("used", "Yak", "yak"), uri),
+        ])
+        let page = "https://example.com/"
+        XCTAssertEqual(ranked(idx, page), ["fav", "b", "a", "used"])
+        XCTAssertEqual(ranked(idx, page, .init(lastUsed: ["used": 20, "a": 10])), ["used", "a", "fav", "b"])
+        XCTAssertEqual(ranked(idx, page, .init(lastUsed: ["used": 20], username: " BOB ")), ["b", "used", "fav", "a"])
+    }
+
+    func testTierBeatsRecencyAndFavorites() {
+        let idx = LoginIndex([
+            (login("sib", "Sibling", favorite: true), [.init("https://other.example.com")]),
+            (login("here", "Here"), [.init("https://app.example.com")]),
+        ])
+        XCTAssertEqual(ranked(idx, "https://app.example.com/", .init(lastUsed: ["sib": 99])), ["here", "sib"])
+    }
+
+    func testSearchNeedsEveryWordAndPrefersWordStarts() {
+        let idx = LoginIndex([
+            (login("1", "Grafana", "tucker"), [.init("https://grafana.example.com")]),
+            (login("2", "Jellyfin", "tucker"), [.init("https://media.example.com")]),
+            (login("3", "Instagram", "admin"), [.init("https://social.example.org")]),
+            (login("4", "Status", "admin"), [.init("https://example.org/status")]),
+        ])
+        XCTAssertEqual(idx.search("tuck graf").map(\.id), ["1"])
+        XCTAssertEqual(idx.search("media").map(\.id), ["2"], "URI hosts are searchable")
+        XCTAssertEqual(idx.search("sta").map(\.id), ["4", "3"], "a word start outranks a match inside a word")
+        XCTAssertEqual(idx.search("ADMIN", lastUsed: ["4": 5]).map(\.id), ["4", "3"])
+        XCTAssertEqual(idx.search("  ").map(\.id), [])
+        XCTAssertEqual(idx.site(of: "4"), "example.org")
+    }
+
+    func testUsageKeepsOnlyIDsAndTimesPrivately() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("usage.json")
+        var usage = LoginUsage(file: file)
+        usage.record("a", at: Date(timeIntervalSince1970: 10))
+        usage.record("b", at: Date(timeIntervalSince1970: 20))
+        usage.prune(keeping: ["b"])
+        XCTAssertEqual(LoginUsage(file: file).lastUsed, ["b": 20])
+        let mode = try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? Int
+        XCTAssertEqual(mode, 0o600)
     }
 }

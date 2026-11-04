@@ -25,6 +25,12 @@ final class Passwords: NSObject {
         /// A username field narrows the logins by what's typed in it; a password field never reports its text.
         let filters: Bool
         var query: String
+        /// The username the page shows next to a password field (a password step): its logins rank first.
+        let username: String?
+        /// Asked for (⌘\) rather than offered on focus: Enter may also run an account action (unlock, log in).
+        var explicit: Bool
+        /// The field takes passkeys (autocomplete "webauthn"): the page's waiting passkey-autofill request lists them.
+        var webauthn = false
     }
 
     private(set) lazy var bitwarden: Bitwarden = {
@@ -74,15 +80,19 @@ final class Passwords: NSObject {
     // MARK: Page hooks
 
     /// ⌘\ — offer logins for the page's focused (or first) sign-in field; falls back to the last
-    /// field reported in this tab (sign-ins inside frames).
+    /// field reported in this tab (sign-ins inside frames). Again while they're up: search the vault.
     func fillFocused(in tab: Tab) {
         guard enabled else { tab.owner.toast("Passwords are off (Settings › Passwords)", color: Browser.shared.style.secondary); return }
+        if let picker, let t = target, t.tab === tab, isCurrent(t) {
+            if canSearch { picker.searching ? picker.focusSearch() : beginSearch() }
+            return
+        }
         guard let wv = tab.webView else { return }
         Task { @MainActor in
             let found = try? await wv.callAsyncJavaScript("return window.__anglPasswordsFind ? window.__anglPasswordsFind() : false",
                                                           arguments: [:], in: nil, contentWorld: Self.world)
             if found as? Bool == true { return }
-            if let t = target, t.tab === tab { show(for: t) }
+            if var t = target, t.tab === tab { t.explicit = true; target = t; show(for: t) }
             else { tab.owner.toast("No sign-in field on this page", color: Browser.shared.style.secondary) }
         }
     }
@@ -95,11 +105,13 @@ final class Passwords: NSObject {
         idleTimer?.invalidate(); idleTimer = nil
         if revoke { forgetRemembered() }
         bitwarden.lock()
+        PasskeyBridge.shared.vaultChanged()
     }
 
     func logOut() {
         lock(revoke: true)
         do { try bitwarden.logOut() } catch { fail(error) }
+        PasskeyBridge.shared.vaultChanged()
     }
 
     /// For Settings › Passwords.
@@ -131,9 +143,16 @@ final class Passwords: NSObject {
             let frameURL = message.frameInfo.request.url
             let url = frameURL?.host() == o.host ? frameURL! : URL(string: origin + "/")!
             let anchor = anchorRect(r, exact: body["exact"] as? Bool ?? false, in: wv)
+            let username = (body["username"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             let t = Target(tab: tab, frame: message.frameInfo, origin: origin, url: url, field: field, document: document, anchor: anchor,
-                           filters: body["kind"] as? String == "user", query: body["query"] as? String ?? "")
-            if let cur = target, cur.field == field, cur.document == document, picker != nil { target = t; picker?.anchor(below: anchor); return }
+                           filters: body["kind"] as? String == "user", query: body["query"] as? String ?? "", username: username,
+                           explicit: explicit, webauthn: body["webauthn"] as? Bool ?? false)
+            // Same field, picker up: follow it (scroll, resize), unless it now takes passkeys.
+            if let cur = target, cur.field == field, cur.document == document, cur.webauthn == t.webauthn, picker != nil {
+                target = t
+                picker?.anchor(below: anchor)
+                return
+            }
             target = t
             show(for: t)
         case "dismiss":
@@ -146,7 +165,7 @@ final class Passwords: NSObject {
             target = t
             show(for: t)
         case "key":
-            guard target?.document == document, let picker, let key = body["key"] as? String else { return }
+            guard target?.document == document, let picker, !picker.searching, let key = body["key"] as? String else { return }
             switch key {
             case "ArrowDown": picker.move(1)
             case "ArrowUp": picker.move(-1)
@@ -159,95 +178,244 @@ final class Passwords: NSObject {
 
     // MARK: Picker
 
-    private func show(for t: Target) {
+    /// The vault is open: the picker can search all of it.
+    private var canSearch: Bool { useBitwarden && bitwarden.state == .unlocked }
+
+    /// `keep`: a refresh of the same list (a sync, a re-anchor) keeps the selected row; otherwise
+    /// the selection starts over (armed only on a passkey or a login for this very site, or an
+    /// asked-for action).
+    private func show(for t: Target, keep: Bool = false) {
         resetIdleTimer()
-        var rows: [Row] = []
+        if let picker, picker.searching { return refreshSearch(picker) }
+        var rows: [Row] = [], footer: [Row] = []
+        var arm = false, search = false
         if useBitwarden {
             switch bitwarden.state {
             case .loggedOut:
                 rows = [.logIn]
+                arm = t.explicit
             case .locked:
                 rows = [.unlock]
                 if settings.rememberUnlock, SealedKey.available, Keychain.exists(rememberedKey) { rows.insert(.touchID, at: 0) }
+                arm = t.explicit
             case .unlocked:
                 bitwarden.refresh()
-                let found = bitwarden.index?.matches(for: t.url) ?? []
                 let q = t.query.trimmingCharacters(in: .whitespacesAndNewlines)
-                var shown = q.isEmpty ? found : found.filter { $0.username.localizedCaseInsensitiveContains(q) || $0.name.localizedCaseInsensitiveContains(q) }
-                if shown.isEmpty, !found.isEmpty {
+                func narrowed(_ name: String, _ username: String) -> Bool {
+                    q.isEmpty || username.localizedCaseInsensitiveContains(q) || name.localizedCaseInsensitiveContains(q)
+                }
+                let found = pageMatches(for: t), request = pagePasskeys(for: t), keys = request?.passkeys ?? []
+                var shown = found.filter { narrowed($0.login.name, $0.login.username) }
+                var shownKeys = keys.filter { narrowed($0.name, $0.userName) }
+                if shown.isEmpty, shownKeys.isEmpty, !q.isEmpty {
                     // Typed past every login: get out of the way (↩ submits the form, not a picker row).
-                    // Asked for (⌘\, a focus) over text that matches nothing: offer them all.
-                    if picker != nil { closePicker(); return }
-                    shown = found
+                    if picker != nil { return closePicker() }
+                    shown = found; shownKeys = keys
                 }
-                if found.isEmpty {
-                    rows = [.note("No saved logins for this site")]
+                if shown.isEmpty, shownKeys.isEmpty {
+                    rows = [.note("No logins saved for \(Self.display(t.url))")]
+                    // ⌘\ on a site with nothing saved: straight to search.
+                    search = t.explicit
                 } else {
-                    if shown.count == found.count, t.filters, found.count > PasswordPicker.visibleRows {
-                        rows = [.note("\(found.count) logins · type to narrow")]
-                    }
-                    rows += shown.map(Row.login)
+                    if !shownKeys.isEmpty, !shown.isEmpty { rows.append(.header("Passkeys")) }
+                    if let request { rows += shownKeys.map { .passkey($0, request) } }
+                    rows += Self.sections(shown, page: t.url, headed: !shownKeys.isEmpty)
+                    // A passkey asks for Touch ID before signing; a password goes into the page, so
+                    // only this site's own is armed. Typing takes the selection away: ↩ is the page's until ↓.
+                    arm = q.isEmpty && (!shownKeys.isEmpty || shown[0].tier <= .nearHost)
                 }
+                footer = [.search]
             }
         }
-        if settings.applePasswords { rows.append(.apple) }
-        present(rows, for: t)
+        if settings.applePasswords { footer.append(.apple) }
+        present(rows, footer: footer, arm: arm, keep: keep, for: t)
+        if search { beginSearch() }
+    }
+
+    /// The page's logins, best first: this site's own before other sites on its domain, then by
+    /// the username the page shows, last use here, favorites.
+    private func pageMatches(for t: Target) -> [LoginIndex.Match] {
+        bitwarden.index?.matches(for: t.url, ranking: .init(lastUsed: bitwarden.usage.lastUsed, username: t.username)) ?? []
+    }
+
+    /// The waiting passkey-autofill request of a main-frame field that takes passkeys, when it's
+    /// from the field's origin and its passkeys are read (`PasskeyBridge.load` re-shows the
+    /// picker when they arrive).
+    private func pagePasskeys(for t: Target) -> PasskeyBridge.Conditional? {
+        guard t.webauthn, t.frame.isMainFrame, let tab = t.tab, let c = PasskeyBridge.shared.conditional(in: tab), c.origin == t.origin else { return nil }
+        guard let revision = bitwarden.settledRevision, c.loaded == revision else {
+            PasskeyBridge.shared.load(c)
+            return nil
+        }
+        return c
+    }
+
+    /// A page started (or replaced) a passkey-autofill request: an open picker for it lists its passkeys.
+    func passkeysChanged(in tab: Tab) {
+        if picker != nil, let t = target, t.tab === tab, isCurrent(t) { show(for: t) }
+    }
+
+    /// Logins under headings: this site's own logins lead without one (unless passkeys come
+    /// first); broader matches say how they match.
+    private static func sections(_ matches: [LoginIndex.Match], page: URL, headed: Bool) -> [Row] {
+        var rows: [Row] = []
+        var current: LoginIndex.Match.Tier?
+        for m in matches {
+            let tier = m.tier == .nearHost ? .host : m.tier
+            if tier != current {
+                switch tier {
+                case .host, .nearHost: if headed { rows.append(.header("Passwords")) }
+                case .rule: rows.append(.header("Matched by URI rules"))
+                case .domain: rows.append(.header("Other logins on \(LoginIndex.domain(of: page.host() ?? "") ?? display(page))"))
+                case .equivalent: rows.append(.header("Equivalent sites"))
+                }
+                current = tier
+            }
+            rows.append(.login(Entry(login: m.login, host: m.host, showHost: m.tier != .host)))
+        }
+        return rows
+    }
+
+    /// host[:port] as the user reads it.
+    private static func display(_ url: URL) -> String {
+        let host = url.host() ?? url.absoluteString
+        return url.port.map { "\(host):\($0)" } ?? host
     }
 
     /// A background sync swapped the index, or the server ended the session.
     private func vaultChanged() {
         if bitwarden.state == .loggedOut { forgetRemembered() }
-        if picker != nil, let t = target, isCurrent(t) { show(for: t) }
+        PasskeyBridge.shared.vaultChanged()
+        if picker != nil, let t = target, isCurrent(t) { show(for: t, keep: true) }
     }
 
-    private func present(_ rows: [Row], for t: Target) {
+    private func present(_ rows: [Row], footer: [Row], arm: Bool, keep: Bool, for t: Target) {
         guard let tab = t.tab, let window = tab.owner.window, isCurrent(t) else { return }
         if picker == nil {
-            let p = PasswordPicker(style: Browser.shared.style) { [weak self] row in self?.picked(row) }
+            let p = PasswordPicker(style: Browser.shared.style)
+            p.onPick = { [weak self] row in self?.picked(row) }
+            p.onArm = { [weak self] armed in self?.armedChanged(armed) }
+            p.onSearch = { [weak self] _ in if let self, let picker = self.picker { self.refreshSearch(picker) } }
+            p.onEndSearch = { [weak self] in self?.endSearch() }
             window.addChildWindow(p, ordered: .above)
             picker = p
             installMonitor()
-            setShown(true, in: t)
         }
-        picker?.set(rows: rows, width: max(280, min(440, t.anchor.width)))
+        picker?.set(rows: rows, footer: footer, arm: arm, keep: keep, width: max(360, min(480, t.anchor.width)))
         picker?.anchor(below: t.anchor)
         picker?.orderFront(nil)
+        armedChanged(picker?.armed ?? false)
+    }
+
+    /// The field passwords.js was last told the picker is up for, and whether a row is armed
+    /// (↩ goes to the page unless one is).
+    private var told: (target: Target, armed: Bool)?
+
+    private func armedChanged(_ armed: Bool) {
+        guard let t = target else { return }
+        if let told, told.target.field == t.field, told.target.document == t.document {
+            if told.armed == armed { return }
+        } else if let told {
+            // The picker moved to another field (maybe another frame): the old one's off.
+            setShown(false, armed: false, in: told.target)
+        }
+        told = (t, armed)
+        setShown(true, armed: armed, in: t)
     }
 
     private func closePicker() {
         guard let p = picker else { return }
         picker = nil
+        if let told, told.target.field != target?.field || told.target.document != target?.document {
+            setShown(false, armed: false, in: told.target)
+        }
+        told = nil
+        // Hand the keyboard back before the panel goes, even with angl inactive, so the browser
+        // window (not a closed panel) is key when angl comes back.
+        if p.isKeyWindow { returnFocus(to: target, from: p) }
         p.parent?.removeChildWindow(p)
         p.orderOut(nil)
         if let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }
-        if let t = target { setShown(false, in: t) }
+        if let t = target { setShown(false, armed: false, in: t) }
     }
 
-    /// Clicks elsewhere in angl or ⌘-shortcuts (tab switches…) close the picker.
+    /// Back to the page's field after the search field had the keyboard. Works with angl inactive
+    /// too: `makeKey` doesn't activate the app, it only stops the panel being key.
+    private func returnFocus(to t: Target?, from p: PasswordPicker) {
+        guard let window = p.parent ?? t?.tab?.owner.window else { return }
+        window.makeKey()
+        if let tab = t?.tab, tab.owner.active === tab, let wv = tab.webView { window.makeFirstResponder(wv) }
+    }
+
+    /// Clicks elsewhere in angl or ⌘-shortcuts (tab switches…) close the picker; in the picker's
+    /// own search field they're editing, and ⌘\ (Fill Login) again opens search.
     private func installMonitor() {
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown]) { event in
             MainActor.assumeIsolated {
                 let p = Passwords.shared
-                if event.type == .keyDown { if event.modifierFlags.contains(.command) { p.closePicker() } }
-                else if event.window !== p.picker { p.closePicker() }
+                guard event.window !== p.picker else { return }
+                if event.type == .keyDown, !event.modifierFlags.contains(.command) || Commands.chord("passwords.fill")?.matches(event) == true { return }
+                p.closePicker()
             }
             return event
         }
     }
 
-    private func setShown(_ shown: Bool, in t: Target) {
+    private func setShown(_ shown: Bool, armed: Bool, in t: Target) {
         guard let wv = t.tab?.webView else { return }
-        wv.callAsyncJavaScript("window.__anglPasswordsShown && window.__anglPasswordsShown(shown)", arguments: ["shown": shown],
+        wv.callAsyncJavaScript("window.__anglPasswordsShown && window.__anglPasswordsShown(shown, armed)", arguments: ["shown": shown, "armed": armed],
                                in: t.frame, in: Self.world) { _ in }
     }
 
+    // MARK: Search
+
+    /// The picker takes the keyboard with a search field over the whole vault; the page's field
+    /// stays the fill target.
+    private func beginSearch() {
+        guard canSearch, let picker, let t = target, isCurrent(t) else { return }
+        picker.beginSearch()
+        armedChanged(false)
+        refreshSearch(picker)
+    }
+
+    private func refreshSearch(_ picker: PasswordPicker) {
+        guard let t = target, canSearch, let index = bitwarden.index else { return closePicker() }
+        let q = picker.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let page = pageMatches(for: t)
+        var rows: [Row]
+        if q.isEmpty {
+            rows = page.isEmpty ? [.note("No logins saved for \(Self.display(t.url)) · type to search")] : Self.sections(page, page: t.url, headed: false)
+        } else {
+            let found = index.search(q, lastUsed: bitwarden.usage.lastUsed)
+            rows = found.isEmpty ? [.note("No logins match “\(q)”")]
+                : found.map { .login(Entry(login: $0, host: index.site(of: $0.id), showHost: true)) }
+        }
+        picker.set(rows: rows, footer: [], arm: true, keep: false, width: 480)
+        picker.anchor(below: t.anchor)
+    }
+
+    /// Esc in the search field: back to the page's logins, keyboard back in the page.
+    private func endSearch() {
+        guard let picker, var t = target else { return }
+        picker.endSearch()
+        returnFocus(to: t, from: picker)
+        // Back to the list, not into search again (⌘\ on a site with nothing saved starts there).
+        t.explicit = false
+        target = t
+        show(for: t)
+    }
+
     private func picked(_ row: Row) {
+        if case .search = row { return beginSearch() }
         closePicker()
         guard let t = target, isCurrent(t), let window = t.tab?.owner.window else { return }
         Task { @MainActor in
             switch row {
-            case .login(let login) where useBitwarden: await fill(login, into: t)
+            case .login(let e) where useBitwarden:
+                await fill(e.login.id, into: t, in: window)
+            case .passkey(let p, let request) where useBitwarden:
+                await PasskeyBridge.shared.sign(with: p, for: request)
             case .unlock where useBitwarden: await exclusive { await unlockSheet(in: window, then: t) }
             case .touchID where useBitwarden: await exclusive { await restoreRemembered(in: window, then: t) }
             case .logIn where useBitwarden: await exclusive { await logIn(in: window, then: t) }
@@ -255,6 +423,20 @@ final class Passwords: NSObject {
             default: break
             }
         }
+    }
+
+    /// A login Bitwarden wouldn't offer for this frame: fill it once, after saying where it goes.
+    /// Nothing is remembered and the login isn't changed.
+    private func confirmElsewhere(_ login: LoginIndex.Login, saved host: String?, for t: Target, in window: NSWindow) async -> Bool {
+        let saved = host.map { "is saved for \($0)" } ?? "has no website saved"
+        let account = login.username.isEmpty ? "“\(login.title)”" : "“\(login.title)” (\(login.username))"
+        let top = t.tab?.webView?.url.map(Self.display)
+        let destination = Self.display(URL(string: t.origin + "/") ?? t.url)
+        let embedded = top.flatMap { $0 == destination ? nil : " inside \($0)" } ?? ""
+        let button = await Sheet.ask("Fill a login saved for another site?",
+                                     "\(account) \(saved). It will be filled into \(t.origin)\(embedded).",
+                                     [], buttons: ["Cancel", "Fill Once"], in: window)
+        return button == 1 && isCurrent(t)
     }
 
     /// Runs one account flow (log in, unlock, Touch ID); a second one while it's up is ignored.
@@ -267,29 +449,45 @@ final class Passwords: NSObject {
 
     // MARK: Fill
 
-    private func fill(_ login: LoginIndex.Login, into t: Target) async {
+    /// Fills login `id` as the vault has it now: the row may predate a sync, so whether it
+    /// matches this page (or needs Fill Once) and whether it asks for the master password are
+    /// decided here, and the fill goes ahead only if the vault didn't change meanwhile.
+    private func fill(_ id: String, into t: Target, in window: NSWindow) async {
         let epoch = bitwarden.epoch
+        guard let revision = bitwarden.settledRevision, let index = bitwarden.index,
+              let login = index.logins.first(where: { $0.id == id }) else { return vaultMoved(t) }
         do {
-            if login.reprompt, let window = t.tab?.owner.window, !(await reprompt(in: window)) { return }
-            let c = try await bitwarden.credentials(login.id)
-            guard epoch == bitwarden.epoch else { return }
-            guard try await put(username: c.username, password: c.password, into: t) else { return }
-            if let code = c.totp, settings.copyTOTP { copy(code, tab: t.tab) }
+            if !pageMatches(for: t).contains(where: { $0.login.id == id }),
+               !(await confirmElsewhere(login, saved: index.site(of: id), for: t, in: window)) { return }
+            if login.reprompt, !(await reprompt(in: window)) { return }
+            let c = try await bitwarden.credentials(id)
+            guard revision == bitwarden.settledRevision else { return vaultMoved(t) }
+            guard let filled = try await put(username: c.username, password: c.password, into: t),
+                  revision == bitwarden.settledRevision else { return }
+            bitwarden.recordUse(id)
+            // The code goes with the password: an identifier-only step doesn't need it yet.
+            if filled.password, let code = c.totp, settings.copyTOTP { copy(code, tab: t.tab) }
         } catch {
             guard epoch == bitwarden.epoch else { return }
             fail(error)
         }
     }
 
-    /// Fills the field's form; passwords.js re-checks the document and origin first.
-    private func put(username: String, password: String, into t: Target) async throws -> Bool {
-        guard isCurrent(t), let wv = t.tab?.webView else { return false }
+    /// A pick that the vault changed under (a sync, lock or logout): nothing was filled.
+    private func vaultMoved(_ t: Target) {
+        t.tab?.owner.toast("Bitwarden changed meanwhile: choose the login again", color: Browser.shared.style.warn)
+    }
+
+    /// Fills the field's form; passwords.js re-checks the document and origin first. nil = the
+    /// field is gone; otherwise which of the two it filled.
+    private func put(username: String, password: String, into t: Target) async throws -> (username: Bool, password: Bool)? {
+        guard isCurrent(t), let wv = t.tab?.webView else { return nil }
         let result = try await wv.callAsyncJavaScript(
             "return window.__anglPasswordsFill(field, documentToken, origin, username, password)",
             arguments: ["field": t.field, "documentToken": t.document, "origin": t.origin, "username": username, "password": password],
             in: t.frame, contentWorld: Self.world)
-        guard result as? Bool == true else { t.tab?.owner.toast("The sign-in field is gone", color: Browser.shared.style.warn); return false }
-        return true
+        guard let filled = result as? [String: Any] else { t.tab?.owner.toast("The sign-in field is gone", color: Browser.shared.style.warn); return nil }
+        return (filled["username"] as? Bool ?? false, filled["password"] as? Bool ?? false)
     }
 
     private func copy(_ code: String, tab: Tab?) {
@@ -389,6 +587,7 @@ final class Passwords: NSObject {
     /// `remember`: seal the user key for Touch ID, if that's on and nothing locked since.
     private func unlocked(then t: Target?, remember: Bool) {
         resetIdleTimer()
+        PasskeyBridge.shared.vaultChanged()
         if remember, settings.rememberUnlock, SealedKey.available {
             let epoch = bitwarden.epoch
             Task { @MainActor in
@@ -618,18 +817,72 @@ extension Passwords: WKScriptMessageHandler {
     }
 }
 
-private enum Row {
-    case login(LoginIndex.Login), unlock, touchID, logIn, apple, note(String)
-    var selectable: Bool { if case .note = self { false } else { true } }
+/// A login in the picker and where it's saved. Whether it matches the frame (or fills only
+/// after Fill Once) is decided when it's picked, against the vault as it is then.
+private struct Entry {
+    let login: LoginIndex.Login
+    /// host[:port] it's saved for.
+    let host: String?
+    /// Say where it's saved: anything but this very host.
+    let showHost: Bool
+}
 
-    var labels: (title: String, detail: String) {
+private enum Row {
+    /// A passkey row signs only the request it was listed for.
+    case login(Entry), passkey(Bitwarden.Passkey, PasskeyBridge.Conditional), header(String), note(String), search, unlock, touchID, logIn, apple
+
+    var selectable: Bool { switch self { case .header, .note: false; default: true } }
+
+    var height: CGFloat { switch self { case .login, .passkey: 44; case .header: 24; case .note: 34; default: 30 } }
+
+    /// Keeps the selection on the same row across a refresh.
+    var id: String {
         switch self {
-        case .login(let l): (l.name.isEmpty ? l.username : l.name, l.name.isEmpty ? "" : l.username)
-        case .unlock: ("Unlock Bitwarden…", "")
-        case .touchID: ("Unlock with Touch ID", "")
-        case .logIn: ("Log in to Bitwarden…", "")
-        case .apple: ("Apple Passwords…", "")
-        case .note(let text): (text, "")
+        case .login(let e): "login:" + e.login.id
+        case .passkey(let p, _): "passkey:" + p.id
+        case .header(let t): "header:" + t
+        case .note(let t): "note:" + t
+        case .search: "search"
+        case .unlock: "unlock"
+        case .touchID: "touchID"
+        case .logIn: "logIn"
+        case .apple: "apple"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .login(let e): e.login.title
+        case .passkey(let p, _): p.userName.isEmpty ? p.name : p.userName
+        case .header(let t), .note(let t): t
+        case .search: "Search Bitwarden…"
+        case .unlock: "Unlock Bitwarden…"
+        case .touchID: "Unlock with Touch ID"
+        case .logIn: "Log in to Bitwarden…"
+        case .apple: "Apple Passwords…"
+        }
+    }
+
+    /// The second line: a login's username when the title is its name; what a passkey is.
+    var subtitle: String {
+        switch self {
+        case .login(let e): e.login.name.isEmpty ? "" : e.login.username
+        case .passkey(let p, _): p.name.isEmpty || p.name == title ? "Passkey" : "Passkey · \(p.name)"
+        default: ""
+        }
+    }
+
+    var accessibilityLabel: String {
+        switch self {
+        case .login(let e):
+            var parts = [title, subtitle]
+            if e.showHost, let host = e.host { parts.append(host) }
+            if e.login.hasPasskey { parts.append("has a passkey") }
+            if e.login.hasTOTP { parts.append("one-time code") }
+            if e.login.reprompt { parts.append("asks for the master password") }
+            return parts.filter { !$0.isEmpty }.joined(separator: ", ")
+        case .passkey: return "\(title), \(subtitle)"
+        default: return title
         }
     }
 }
@@ -646,16 +899,18 @@ enum Sheet {
         alert.messageText = title
         alert.informativeText = info
         buttons.forEach { alert.addButton(withTitle: $0) }
-        let grid = NSGridView(views: rows.map { label, view in
-            if view is NSTextField || view is NSPopUpButton { view.widthAnchor.constraint(equalToConstant: 240).isActive = true }
-            return [label.isEmpty ? NSGridCell.emptyContentView : NSTextField(labelWithString: label), view]
-        })
-        grid.rowSpacing = 8
-        grid.column(at: 0).xPlacement = .trailing
-        grid.rowAlignment = .firstBaseline
-        grid.layoutSubtreeIfNeeded()
-        grid.frame.size = grid.fittingSize
-        alert.accessoryView = grid
+        if !rows.isEmpty {
+            let grid = NSGridView(views: rows.map { label, view in
+                if view is NSTextField || view is NSPopUpButton { view.widthAnchor.constraint(equalToConstant: 240).isActive = true }
+                return [label.isEmpty ? NSGridCell.emptyContentView : NSTextField(labelWithString: label), view]
+            })
+            grid.rowSpacing = 8
+            grid.column(at: 0).xPlacement = .trailing
+            grid.rowAlignment = .firstBaseline
+            grid.layoutSubtreeIfNeeded()
+            grid.frame.size = grid.fittingSize
+            alert.accessoryView = grid
+        }
         alert.window.initialFirstResponder = focus ?? rows.first?.1
         if let shown { Task { @MainActor in shown() } }
         let response = await alert.beginSheetModal(for: window)
@@ -722,34 +977,58 @@ private final class ServerField: NSObject {
 
 // MARK: - Picker
 
-/// A list under the sign-in field. Logins scroll past `visibleRows` (fewer on a short screen);
-/// a trailing Apple Passwords row stays pinned below them. Non-activating: the page keeps focus,
-/// so typing continues (narrowing a username field's logins) and passwords.js forwards ↑ ↓ ↩ esc.
+/// A list under the sign-in field: the page's logins (scrolling past about six), then pinned
+/// Search and Apple Passwords rows. Non-activating: the page keeps focus, so typing narrows a
+/// username field's logins and passwords.js forwards ↑ ↓ ↩ esc. Search takes the keyboard: the
+/// panel turns key with a search field over the whole vault.
 @MainActor
-private final class PasswordPicker: NSPanel {
-    static let visibleRows = 8
+private final class PasswordPicker: NSPanel, NSTextFieldDelegate {
     private let list: PickerList
+    private let searchField = NSTextField()
     private var field = NSRect.zero
-    private var width: CGFloat = 300
+    private var width: CGFloat = 360
+    var onPick: (Row) -> Void = { _ in }
+    /// A row is selected (↩ picks it) or not (↩ is the page's).
+    var onArm: (Bool) -> Void = { _ in }
+    var onSearch: (String) -> Void = { _ in }
+    var onEndSearch: () -> Void = {}
+    private(set) var searching = false
 
-    init(style: Style, action: @escaping (Row) -> Void) {
-        list = PickerList(style: style, action: action)
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 300, height: 30), styleMask: [.borderless, .nonactivatingPanel],
+    init(style: Style) {
+        list = PickerList(style: style)
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 360, height: 32), styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: false)
         isFloatingPanel = true
+        becomesKeyOnlyIfNeeded = true
         hasShadow = true
         isOpaque = true
         backgroundColor = style.raised
         hidesOnDeactivate = true
         contentView = list
+        list.onPick = { [weak self] row in self?.onPick(row) }
+        list.onArm = { [weak self] armed in self?.onArm(armed) }
+        searchField.isBordered = false; searchField.drawsBackground = false; searchField.focusRingType = .none
+        searchField.usesSingleLineMode = true; searchField.cell?.isScrollable = true; searchField.cell?.wraps = false
+        searchField.font = style.ui; searchField.textColor = style.primary
+        searchField.placeholderString = "Search Bitwarden: name, username or site"
+        searchField.setAccessibilityLabel("Search Bitwarden")
+        searchField.delegate = self
+        searchField.isHidden = true
+        list.addSubview(searchField)
+        list.searchField = searchField
     }
 
-    override var canBecomeKey: Bool { false }
+    /// Key only while searching: otherwise the page keeps the keyboard.
+    override var canBecomeKey: Bool { searching }
     override var canBecomeMain: Bool { false }
 
-    func set(rows: [Row], width: CGFloat) {
+    var armed: Bool { list.armed }
+    var searchText: String { searchField.stringValue }
+
+    /// `arm`: select the first row (↩ picks it). `keep`: keep the selected row if it's still there.
+    func set(rows: [Row], footer: [Row], arm: Bool, keep: Bool, width: CGFloat) {
         self.width = width
-        list.rows = rows
+        list.set(rows: rows, footer: footer, arm: arm, keep: keep)
         place()
     }
 
@@ -758,14 +1037,34 @@ private final class PasswordPicker: NSPanel {
         place()
     }
 
+    func beginSearch() {
+        searching = true
+        list.searching = true
+        searchField.stringValue = ""
+        searchField.isHidden = false
+        focusSearch()
+    }
+
+    func focusSearch() {
+        makeKey()
+        makeFirstResponder(searchField)
+        searchField.currentEditor()?.selectAll(nil)
+    }
+
+    func endSearch() {
+        makeFirstResponder(nil)
+        searching = false
+        list.searching = false
+        searchField.isHidden = true
+        searchField.stringValue = ""
+    }
+
     /// Below the field when it fits, else on the roomier side; the scrolling band shrinks to fit.
     private func place() {
         let screen = parent?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? field.insetBy(dx: -4000, dy: -4000)
         let below = field.minY - screen.minY - 4, above = screen.maxY - field.maxY - 4
-        var visible = min(list.split, Self.visibleRows)
-        while visible > 1, list.height(visible: visible) > max(below, above) { visible -= 1 }
-        list.visible = visible
-        let size = NSSize(width: width, height: list.height(visible: visible))
+        list.room = max(below, above)
+        let size = NSSize(width: width, height: list.height)
         let y = size.height <= below || below >= above ? field.minY - size.height - 4 : field.maxY + 4
         let x = min(max(field.minX, screen.minX), screen.maxX - size.width)
         setFrame(NSRect(origin: NSPoint(x: x, y: y), size: size), display: true)
@@ -773,78 +1072,135 @@ private final class PasswordPicker: NSPanel {
 
     func move(_ d: Int) { list.move(d) }
     func activate() { list.activate() }
+
+    func controlTextDidChange(_ obj: Notification) { onSearch(searchField.stringValue) }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        switch selector {
+        case #selector(NSResponder.moveDown(_:)): list.move(1)
+        case #selector(NSResponder.moveUp(_:)): list.move(-1)
+        case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)): list.activate()
+        case #selector(NSResponder.cancelOperation(_:)), #selector(NSResponder.insertTab(_:)), #selector(NSResponder.insertBacktab(_:)): onEndSearch()
+        default: return false
+        }
+        return true
+    }
 }
 
-/// The picker's rows. Logins scroll inside their band (wheel or trackpad, or following the
-/// keyboard selection); a trailing Apple Passwords row is pinned below a hairline.
+/// VoiceOver's handle on one picker row; "press" picks it.
+private final class PickerRowElement: NSAccessibilityElement {
+    var press: () -> Bool = { false }
+    override func accessibilityPerformPress() -> Bool { press() }
+}
+
+/// The picker's rows: an optional search band, the scrolling rows (wheel, trackpad, or following
+/// the keyboard selection), then pinned footer rows below a hairline.
 @MainActor
 private final class PickerList: NSView {
-    static let rowH: CGFloat = 30
+    static let searchBand: CGFloat = 40
+    /// The scrolling band's tallest: six logins and two headings.
+    static let maxBand: CGFloat = 6 * 44 + 2 * 24
     let style: Style
-    let action: (Row) -> Void
-    var rows: [Row] = [] {
-        didSet {
-            if case .apple? = rows.last { split = rows.count - 1 } else { split = rows.count }
-            offset = 0
-            selected = rows.firstIndex(where: \.selectable) ?? -1
-            needsDisplay = true
-            rebuildAccessibility()
-        }
-    }
-    /// rows[..<split] scroll; rows[split...] are pinned.
-    private(set) var split = 0
-    /// Scrolling rows shown at once; the picker fits it to the screen.
-    var visible = 0 {
-        didSet { offset = clamp(offset); needsDisplay = true; layoutAccessibility() }
-    }
-    /// How far the scrolling band is scrolled, in points.
+    var onPick: (Row) -> Void = { _ in }
+    var onArm: (Bool) -> Void = { _ in }
+    weak var searchField: NSTextField?
+    var searching = false { didSet { relayout(); needsLayout = true } }
+    /// Height the screen leaves for the panel.
+    var room: CGFloat = .greatestFiniteMagnitude { didSet { if room != oldValue { relayout() } } }
+
+    private var rows: [Row] = []
+    /// rows[..<split] scroll; rows[split...] are the pinned footer.
+    private var split = 0
+    /// Each scrolling row's top within the scrolled content.
+    private var tops: [CGFloat] = []
+    private var contentH: CGFloat = 0
+    private var footerH: CGFloat = 0
+    private var bandH: CGFloat = 0
+    /// How far the band is scrolled, in points.
     private var offset: CGFloat = 0
-    private var selected = -1 {
+    /// The keyboard's row; nil = none (↩ goes to the page).
+    private var selected: Int? {
         didSet {
             guard selected != oldValue else { return }
             needsDisplay = true
             for (i, e) in axRows.enumerated() { e.setAccessibilitySelected(i == selected) }
             NSAccessibility.post(element: self, notification: .selectedChildrenChanged)
+            if (selected != nil) != (oldValue != nil) { onArm(selected != nil) }
         }
     }
-    /// VoiceOver sees one row element per row; kept here because AX doesn't retain them.
-    private var axRows: [NSAccessibilityElement] = []
+    /// Under the mouse: highlighted, but not armed.
+    private var hovered: Int? { didSet { if hovered != oldValue { needsDisplay = true } } }
+    /// VoiceOver sees one element per row; kept here because AX doesn't retain them.
+    private var axRows: [PickerRowElement] = []
+    private var badges: [String: NSImage] = [:]
 
-    init(style: Style, action: @escaping (Row) -> Void) {
-        self.style = style; self.action = action
+    var armed: Bool { selected != nil }
+
+    init(style: Style) {
+        self.style = style
         super.init(frame: .zero)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.list)
+        setAccessibilityLabel("Logins")
     }
     required init?(coder: NSCoder) { fatalError() }
 
     override var isFlipped: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    func set(rows main: [Row], footer: [Row], arm: Bool, keep: Bool) {
+        let kept = keep ? selected.map { rows[$0].id } : nil
+        let first = (main + footer).firstIndex(where: \.selectable)
+        axRows = []
+        rows = main + footer
+        split = main.count
+        var y: CGFloat = 0
+        tops = main.map { r in defer { y += r.height }; return y }
+        contentH = y
+        footerH = footer.reduce(0) { $0 + $1.height }
+        hovered = nil
+        if !keep { offset = 0 }
+        if let kept { selected = rows.firstIndex { $0.id == kept } ?? (arm ? first : nil) } else { selected = keep ? nil : arm ? first : nil }
+        relayout()
+        rebuildAccessibility()
+    }
+
     // MARK: Geometry
 
-    private var bandH: CGFloat { CGFloat(visible) * Self.rowH }
-    private var band: NSRect { NSRect(x: 1, y: 1, width: bounds.width - 2, height: bandH) }
-    private var hairline: Bool { visible > 0 && split < rows.count }
-    private var pinnedTop: CGFloat { 1 + bandH + (hairline ? 1 : 0) }
-    private var contentH: CGFloat { CGFloat(split) * Self.rowH }
+    private var bandTop: CGFloat { searching ? 2 + Self.searchBand : 1 }
+    private var hairline: Bool { split > 0 && footerH > 0 }
+    private var footerTop: CGFloat { bandTop + bandH + (hairline ? 1 : 0) }
+    private var band: NSRect { NSRect(x: 1, y: bandTop, width: bounds.width - 2, height: bandH) }
+    /// The panel's height for the current rows and room.
+    var height: CGFloat { footerTop + footerH + 1 }
 
-    /// Panel height with `v` scrolling rows showing.
-    func height(visible v: Int) -> CGFloat {
-        let pinned = rows.count - split
-        return max(CGFloat(v + pinned) * Self.rowH + (v > 0 && pinned > 0 ? 1 : 0) + 2, Self.rowH + 2)
+    private func relayout() {
+        let fixed = bandTop + (hairline ? 1 : 0) + footerH + 1
+        bandH = min(contentH, Self.maxBand, max(room - fixed, min(contentH, 44)))
+        offset = clamp(offset)
+        layoutAccessibility()
+        needsDisplay = true
+    }
+
+    override func layout() {
+        super.layout()
+        guard let searchField else { return }
+        let font = searchField.font ?? style.ui
+        let fh = ceil(font.ascender - font.descender + font.leading) + 2
+        searchField.frame = NSRect(x: 36, y: 1 + ((Self.searchBand - fh) / 2).rounded(), width: bounds.width - 48, height: fh)
     }
 
     private func clamp(_ y: CGFloat) -> CGFloat { min(max(0, y), max(0, contentH - bandH)) }
 
     private func rowRect(_ i: Int) -> NSRect {
-        let y = i < split ? 1 + CGFloat(i) * Self.rowH - offset : pinnedTop + CGFloat(i - split) * Self.rowH
-        return NSRect(x: 1, y: y, width: bounds.width - 2, height: Self.rowH)
+        let y = i < split ? bandTop + tops[i] - offset : footerTop + rows[split..<i].reduce(0) { $0 + $1.height }
+        return NSRect(x: 1, y: y, width: bounds.width - 2, height: rows[i].height)
     }
 
-    private func index(at event: NSEvent) -> Int {
+    private func index(at event: NSEvent) -> Int? {
         let p = convert(event.locationInWindow, from: nil)
-        if band.contains(p) { return Int((p.y - 1 + offset) / Self.rowH) }
-        let i = p.y >= pinnedTop ? split + Int((p.y - pinnedTop) / Self.rowH) : -1
-        return i < rows.count ? i : -1
+        let candidates = band.contains(p) ? 0..<split : p.y >= footerTop ? split..<rows.count : 0..<0
+        return candidates.first { rowRect($0).contains(p) }
     }
 
     private func scroll(to y: CGFloat) {
@@ -860,59 +1216,69 @@ private final class PickerList: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseMoved, .activeAlways, .inVisibleRect], owner: self))
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
     }
 
     override func mouseMoved(with event: NSEvent) {
-        let i = index(at: event)
-        if rows.indices.contains(i), rows[i].selectable { selected = i }
+        hovered = index(at: event).flatMap { rows[$0].selectable ? $0 : nil }
     }
 
+    override func mouseExited(with event: NSEvent) { hovered = nil }
+
     override func mouseDown(with event: NSEvent) {
-        let i = index(at: event)
-        guard rows.indices.contains(i), rows[i].selectable else { return }
+        guard let i = index(at: event), rows[i].selectable else { return }
         selected = i
         activate()
     }
 
     override func scrollWheel(with event: NSEvent) {
         guard contentH > bandH else { return }
-        scroll(to: offset - (event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * Self.rowH))
+        scroll(to: offset - (event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * 44))
         mouseMoved(with: event)
     }
 
+    /// ↑ ↓ stop at the ends. With nothing selected, ↓ takes the first row and ↑ the last.
     func move(_ d: Int) {
         let choices = rows.indices.filter { rows[$0].selectable }
         guard !choices.isEmpty else { return }
-        let at = choices.firstIndex(of: selected) ?? 0
-        selected = choices[(at + d + choices.count) % choices.count]
-        guard selected < split else { return }
-        // Back at the first choice: show the top (a note above it) too.
-        let top = selected == choices.first ? 0 : CGFloat(selected) * Self.rowH
-        if top < offset { scroll(to: top) } else if top + Self.rowH > offset + bandH { scroll(to: top + Self.rowH - bandH) }
+        if let s = selected, let at = choices.firstIndex(of: s) {
+            selected = choices[min(max(at + d, 0), choices.count - 1)]
+        } else {
+            selected = d > 0 ? choices[0] : choices[choices.count - 1]
+        }
+        guard let s = selected, s < split else { return }
+        // Keep a heading in view with its first row, and the top (a note) with the first choice.
+        let top = s == choices.first ? 0 : s > 0 && !rows[s - 1].selectable ? tops[s - 1] : tops[s]
+        let bottom = tops[s] + rows[s].height
+        if top < offset { scroll(to: top) } else if bottom > offset + bandH { scroll(to: bottom - bandH) }
     }
 
     func activate() {
-        guard rows.indices.contains(selected) else { return }
-        action(rows[selected])
+        guard let s = selected, rows.indices.contains(s) else { return }
+        onPick(rows[s])
     }
 
     // MARK: Accessibility
 
     private func rebuildAccessibility() {
         axRows = rows.enumerated().map { index, row in
-            let (title, detail) = row.labels
-            let e = NSAccessibilityElement()
+            let e = PickerRowElement()
             e.setAccessibilityElement(true)
-            e.setAccessibilityRole(.row)
-            e.setAccessibilityLabel([title, detail].filter { !$0.isEmpty }.joined(separator: ", "))
+            e.setAccessibilityRole(row.selectable ? .row : .staticText)
+            e.setAccessibilityLabel(row.accessibilityLabel)
             e.setAccessibilityParent(self)
             e.setAccessibilitySelected(index == selected)
+            if row.selectable {
+                e.press = { [weak self] in
+                    guard let self, self.rows.indices.contains(index) else { return false }
+                    self.selected = index
+                    self.activate()
+                    return true
+                }
+            }
             return e
         }
         layoutAccessibility()
-        setAccessibilityElement(true)
-        setAccessibilityRole(.list)
         setAccessibilityChildren(axRows)
         NSAccessibility.post(element: self, notification: .layoutChanged)
     }
@@ -932,7 +1298,14 @@ private final class PickerList: NSView {
         style.raised.setFill(); bounds.fill()
         style.border.setStroke()
         let edge = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5)); edge.lineWidth = 1; edge.stroke()
-        if visible > 0 {
+        if searching {
+            if let glass = badge("magnifyingglass", size: 13, color: style.secondary) {
+                glass.draw(in: NSRect(x: 19 - glass.size.width / 2, y: 1 + (Self.searchBand - glass.size.height) / 2,
+                                      width: glass.size.width, height: glass.size.height))
+            }
+            style.border.setFill(); NSRect(x: 1, y: 1 + Self.searchBand, width: bounds.width - 2, height: 1).fill()
+        }
+        if bandH > 0 {
             NSGraphicsContext.saveGraphicsState()
             band.clip()
             for i in 0..<split where rowRect(i).intersects(band) { drawRow(i) }
@@ -945,8 +1318,36 @@ private final class PickerList: NSView {
             }
             NSGraphicsContext.restoreGraphicsState()
         }
-        if hairline { style.border.setFill(); NSRect(x: 1, y: pinnedTop - 1, width: bounds.width - 2, height: 1).fill() }
+        if hairline { style.border.setFill(); NSRect(x: 1, y: footerTop - 1, width: bounds.width - 2, height: 1).fill() }
         for i in split..<rows.count { drawRow(i) }
+    }
+
+    /// A tinted symbol, cached per name, size and color.
+    private func badge(_ name: String, size: CGFloat = 11, color: NSColor) -> NSImage? {
+        let key = "\(name)|\(size)|\(color.description)"
+        if let hit = badges[key] { return hit }
+        guard let image = style.symbol(name, size: size)?.tinted(color) else { return nil }
+        badges[key] = image
+        return image
+    }
+
+    private static func lineHeight(_ font: NSFont) -> CGFloat { ceil(font.ascender - font.descender + font.leading) }
+
+    private func width(_ s: String, _ font: NSFont) -> CGFloat { ceil((s as NSString).size(withAttributes: [.font: font]).width) }
+
+    /// One line of text, truncated at `width`, top at `y`.
+    private func text(_ s: String, x: CGFloat, y: CGFloat, width: CGFloat, font: NSFont, color: NSColor) {
+        guard width > 8, !s.isEmpty else { return }
+        let para = NSMutableParagraphStyle(); para.lineBreakMode = .byTruncatingTail
+        (s as NSString).draw(in: NSRect(x: x, y: y, width: width, height: Self.lineHeight(font)),
+                             withAttributes: [.font: font, .foregroundColor: color, .paragraphStyle: para])
+    }
+
+    /// Right-aligned short text ending at `right`; returns where it starts.
+    private func trailingText(_ s: String, right: CGFloat, midY: CGFloat, font: NSFont, color: NSColor) -> CGFloat {
+        let w = width(s, font)
+        text(s, x: right - w, y: midY - Self.lineHeight(font) / 2, width: w + 2, font: font, color: color)
+        return right - w
     }
 
     private func drawRow(_ i: Int) {
@@ -954,18 +1355,117 @@ private final class PickerList: NSView {
         if i == selected {
             style.selected.setFill(); r.fill()
             style.accent.setFill(); NSRect(x: r.minX, y: r.minY, width: 2, height: r.height).fill()
+        } else if i == hovered {
+            style.selected.withAlphaComponent(0.55).setFill(); r.fill()
         }
-        let (title, detail) = row.labels
-        let color = switch row { case .login: style.primary; case .note: style.muted; default: style.accent }
-        let font = style.monoSmall
-        let detailAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: style.secondary]
-        let detailW = detail.isEmpty ? 0 : min((detail as NSString).size(withAttributes: detailAttrs).width, r.width * 0.5)
-        let para = NSMutableParagraphStyle(); para.lineBreakMode = .byTruncatingTail
-        let titleRect = NSRect(x: r.minX + 12, y: r.midY - font.pointSize * 0.65, width: r.width - 24 - (detailW > 0 ? detailW + 12 : 0), height: font.pointSize * 1.4)
-        (title as NSString).draw(in: titleRect, withAttributes: [.font: font, .foregroundColor: color, .paragraphStyle: para])
-        if detailW > 0 {
-            let dr = NSRect(x: r.maxX - 12 - detailW, y: titleRect.minY, width: detailW, height: titleRect.height)
-            (detail as NSString).draw(in: dr, withAttributes: detailAttrs.merging([.paragraphStyle: para]) { $1 })
+        let textX = r.minX + 36, right = r.maxX - 12
+        switch row {
+        case .header(let title):
+            let font = style.uiSmall
+            text(title, x: r.minX + 12, y: r.maxY - 5 - Self.lineHeight(font), width: r.width - 24, font: font, color: style.muted)
+        case .note(let note):
+            let font = style.uiSmall
+            text(note, x: r.minX + 12, y: r.midY - Self.lineHeight(font) / 2, width: r.width - 24, font: font, color: style.secondary)
+        case .login(let e):
+            drawIcon(e, in: NSRect(x: r.minX + 8, y: r.midY - 10, width: 20, height: 20))
+            let badges = [(e.login.reprompt, "lock.fill"), (e.login.hasTOTP, "timer"), (e.login.hasPasskey, "person.badge.key.fill")]
+                .filter(\.0).map(\.1)
+            drawLines(row, in: r, selected: i == selected, host: e.showHost ? e.host : nil, badges: badges)
+        case .passkey:
+            if let img = badge("person.badge.key.fill", size: 14, color: style.accent) {
+                img.draw(in: NSRect(x: r.minX + 18 - img.size.width / 2, y: r.midY - img.size.height / 2, width: img.size.width, height: img.size.height))
+            }
+            drawLines(row, in: r, selected: i == selected, host: nil, badges: [])
+        case .search, .unlock, .touchID, .logIn, .apple:
+            let glyph = switch row {
+            case .search: "magnifyingglass"
+            case .unlock: "lock.open"
+            case .touchID: "touchid"
+            case .logIn: "person.crop.circle"
+            default: "key"
+            }
+            if let img = badge(glyph, size: 13, color: style.accent) {
+                img.draw(in: NSRect(x: r.minX + 18 - img.size.width / 2, y: r.midY - img.size.height / 2, width: img.size.width, height: img.size.height))
+            }
+            var trailing = right
+            if i == selected { trailing = trailingText("↩", right: trailing, midY: r.midY, font: style.monoSmall, color: style.secondary) - 10 }
+            if case .search = row, let chord = Commands.chord("passwords.fill")?.label, !chord.isEmpty {
+                trailing = trailingText(chord, right: trailing, midY: r.midY, font: style.monoSmall, color: style.muted) - 10
+            }
+            text(row.title, x: textX, y: r.midY - Self.lineHeight(style.ui) / 2, width: trailing - textX, font: style.ui, color: style.accent)
         }
+    }
+
+    /// A login or passkey: title (and where it's saved) over subtitle (and badges).
+    private func drawLines(_ row: Row, in r: NSRect, selected: Bool, host: String?, badges: [String]) {
+        let textX = r.minX + 36
+        var trailing = r.maxX - 12
+        if selected { trailing = trailingText("↩", right: trailing, midY: r.midY, font: style.monoSmall, color: style.secondary) - 10 }
+        let titleFont = style.ui, subFont = style.monoSmall
+        let titleH = Self.lineHeight(titleFont), subH = Self.lineHeight(subFont)
+        let subtitle = row.subtitle
+        let twoLines = !subtitle.isEmpty || !badges.isEmpty
+        let titleY = twoLines ? r.midY - (titleH + 2 + subH) / 2 : r.midY - titleH / 2
+        let subY = titleY + titleH + 2
+        var titleRight = trailing
+        if let host {
+            let w = min(width(host, subFont), (trailing - textX) * 0.45)
+            titleRight = trailing - w
+            text(host, x: titleRight, y: titleY + (titleH - subH) / 2 + 1, width: w, font: subFont, color: style.muted)
+            titleRight -= 10
+        }
+        text(row.title, x: textX, y: titleY, width: titleRight - textX, font: titleFont, color: style.primary)
+        var badgeX = trailing
+        for name in badges {
+            guard let img = badge(name, color: style.muted) else { continue }
+            badgeX -= img.size.width
+            img.draw(in: NSRect(x: badgeX, y: subY + (subH - img.size.height) / 2, width: img.size.width, height: img.size.height))
+            badgeX -= 6
+        }
+        text(subtitle, x: textX, y: subY, width: badgeX - textX - 4, font: subFont, color: style.secondary)
+    }
+
+    /// The site's stored favicon on a tile that keeps it visible (light for dark logos, the theme's
+    /// for light ones), else the login's initial.
+    private func drawIcon(_ e: Entry, in rect: NSRect) {
+        let host = e.host.flatMap { $0.split(separator: ":").first.map(String.init) }
+        let tile = NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5)
+        if let host, let icon = Tab.storedFavicon(for: URL(string: "https://" + host)) {
+            (Self.isLight(icon) ? style.border : NSColor(white: 0.97, alpha: 1)).setFill()
+            tile.fill()
+            icon.draw(in: rect.insetBy(dx: 3, dy: 3), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            return
+        }
+        style.border.setFill(); tile.fill()
+        let letter = e.login.title.first.map { String($0).uppercased() } ?? "?"
+        let font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        let w = width(letter, font)
+        (letter as NSString).draw(at: NSPoint(x: rect.midX - w / 2, y: rect.midY - Self.lineHeight(font) / 2),
+                                  withAttributes: [.font: font, .foregroundColor: style.primary])
+    }
+
+    private static let lightIcons = NSMapTable<NSImage, NSNumber>.weakToStrongObjects()
+
+    /// Mostly light where it's opaque (a white logo for dark pages): averaged over an 8×8 copy,
+    /// once per image.
+    private static func isLight(_ icon: NSImage) -> Bool {
+        if let hit = lightIcons.object(forKey: icon) { return hit.boolValue }
+        var px = [UInt8](repeating: 0, count: 8 * 8 * 4)
+        let light = px.withUnsafeMutableBytes { buf -> Bool in
+            guard let cg = icon.cgImage(forProposedRect: nil, context: nil, hints: nil),
+                  let ctx = CGContext(data: buf.baseAddress, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 32,
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: 8, height: 8))
+            var luminance = 0.0, coverage = 0.0
+            for i in stride(from: 0, to: buf.count, by: 4) {
+                // Premultiplied: each channel already carries its alpha.
+                luminance += 0.2126 * Double(buf[i]) + 0.7152 * Double(buf[i + 1]) + 0.0722 * Double(buf[i + 2])
+                coverage += Double(buf[i + 3])
+            }
+            return coverage > 0 && luminance / coverage > 0.75
+        }
+        lightIcons.setObject(NSNumber(value: light), forKey: icon)
+        return light
     }
 }

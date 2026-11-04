@@ -57,6 +57,8 @@ final class Bitwarden {
 
     private(set) var account: Account?
     private(set) var index: LoginIndex?
+    /// When each login was last filled here (IDs and times only); lives and dies with the account.
+    private(set) lazy var usage = LoginUsage(file: usageFile)
     /// Called when a background sync swaps in a new index.
     var onChange: (() -> Void)?
     private var sdk: BitwardenSDK?
@@ -80,6 +82,7 @@ final class Bitwarden {
     var state: State { account == nil ? .loggedOut : index == nil ? .locked : .unlocked }
     private var accountFile: URL { dir.appendingPathComponent("account.json") }
     private var cacheFile: URL { dir.appendingPathComponent("sync.json") }
+    private var usageFile: URL { dir.appendingPathComponent("usage.json") }
 
     /// This install's device identifier, kept across logins (Bitwarden asks to verify new devices).
     private lazy var device: String = {
@@ -94,11 +97,21 @@ final class Bitwarden {
     /// For flows that start with a sheet: capture before showing it, pass to the unlock or login;
     /// a lock, login or logout in between cancels the commit.
     var epoch: UInt64 { generation }
+    /// Moves whenever the SDK's vault or the index may change: every lock, unlock and login, and
+    /// each sync both before it loads into the SDK and when its index lands.
+    private var vaultRevision: UInt64 = 0
+    /// The vault's state while the SDK and the index hold the same vault; nil while a sync loads
+    /// (between its two bumps). Anything read from the vault or index under an older value (say,
+    /// a login's re-prompt flag) may be stale. SDK calls run in the order they're made on the
+    /// main actor, so a call made under a value runs before any load that moves it.
+    var settledRevision: UInt64? { vaultRevision == loadingRevision ? nil : vaultRevision }
+    private var loadingRevision: UInt64?
 
     // MARK: Lock / unlock
 
     func lock() {
         generation &+= 1
+        vaultRevision &+= 1
         sdk = nil
         index = nil
         access = nil
@@ -114,9 +127,10 @@ final class Bitwarden {
         checking = nil
         lastCheck = nil
         var failure: Error?
-        for file in [accountFile, cacheFile] where FileManager.default.fileExists(atPath: file.path) {
+        for file in [accountFile, cacheFile, usageFile] where FileManager.default.fileExists(atPath: file.path) {
             do { try FileManager.default.removeItem(at: file) } catch { failure = error }
         }
+        usage = LoginUsage(file: usageFile)
         do {
             if let token = saved?.twoFactor, let identity = saved?.twoFactorFor {
                 try store(Secrets(twoFactor: token, twoFactorFor: identity))
@@ -138,7 +152,9 @@ final class Bitwarden {
         let index = try await Self.index(sdk, domains: loaded["domains"] as? [[String]] ?? [])
         guard epoch == generation else { throw CancellationError() }
         self.sdk = sdk
+        vaultRevision &+= 1
         self.index = index
+        usage.prune(keeping: Set(index.logins.map(\.id)))
         refresh(force: true)
     }
 
@@ -149,7 +165,8 @@ final class Bitwarden {
             return LoginIndex(items.map { item in
                 let login = LoginIndex.Login(id: item["id"] as? String ?? "", name: item["name"] as? String ?? "",
                                              username: item["username"] as? String ?? "", hasTOTP: item["totp"] as? Bool ?? false,
-                                             reprompt: item["reprompt"] as? Bool ?? false, hasPasskey: item["passkey"] as? Bool ?? false)
+                                             reprompt: item["reprompt"] as? Bool ?? false, hasPasskey: item["passkey"] as? Bool ?? false,
+                                             favorite: item["favorite"] as? Bool ?? false)
                 let uris = (item["uris"] as? [[String: Any]] ?? []).compactMap { u in
                     (u["uri"] as? String).map { LoginIndex.URI($0, rule: (u["match"] as? Int).flatMap(LoginIndex.Rule.init)) }
                 }
@@ -163,6 +180,12 @@ final class Bitwarden {
         let out = try await sdk.call("login", ["id": id])
         return Credentials(username: out["username"] as? String ?? "", password: out["password"] as? String ?? "",
                            totp: (out["totp"] as? [String: Any])?["code"] as? String)
+    }
+
+    /// A login was just filled (or signed in with): it ranks first among its peers next time.
+    func recordUse(_ id: String) {
+        guard account != nil else { return }
+        usage.record(id)
     }
 
     /// Master password re-prompt.
@@ -249,10 +272,26 @@ final class Bitwarden {
                 self.account?.revision = revision
                 try save(sync: data)
                 guard generation == self.generation, let sdk else { return }
-                let loaded = try await sdk.call("load", data: data)
-                let index = try await Self.index(sdk, domains: loaded["domains"] as? [[String]] ?? [])
+                // Before the load (the SDK's ciphers change) and again with the new index (until
+                // then, the index describes the old vault).
+                vaultRevision &+= 1
+                loadingRevision = vaultRevision
+                let index: LoginIndex
+                do {
+                    let loaded = try await sdk.call("load", data: data)
+                    index = try await Self.index(sdk, domains: loaded["domains"] as? [[String]] ?? [])
+                } catch {
+                    // The SDK may hold part of the new vault and the index all of the old one:
+                    // lock rather than serve that mix (unlocking reads the saved sync).
+                    guard generation == self.generation else { return }
+                    lock()
+                    onChange?()
+                    return
+                }
                 guard generation == self.generation else { return }
                 self.index = index
+                vaultRevision &+= 1
+                usage.prune(keeping: Set(index.logins.map(\.id)))
                 onChange?()
             } catch is SignedOut {
                 guard epoch == accountEpoch else { return }
@@ -260,6 +299,13 @@ final class Bitwarden {
                 onChange?()
             } catch {}
         }
+    }
+
+    /// Returns when the sync in flight (if any) is done, or after `limit` on a slow server: for
+    /// decisions it would otherwise cancel, such as the logins offered right after an unlock.
+    func synced(within limit: Duration = .seconds(5)) async {
+        let end = ContinuousClock.now + limit
+        while checking != nil, ContinuousClock.now < end { try? await Task.sleep(for: .milliseconds(50)) }
     }
 
     private func sync(server: Server, token: String, device: String) async throws -> Data {
@@ -456,6 +502,7 @@ final class Bitwarden {
         self.account = account
         try save(sync: data)
         sdk = attempt.sdk
+        vaultRevision &+= 1
         self.index = index
         lastCheck = Date()
     }
@@ -610,7 +657,10 @@ final class BitwardenSDK: @unchecked Sendable {
     }
 
     @discardableResult
+    nonisolated(nonsending)
     func call(_ method: String, data: Data) async throws -> [String: Any] {
+        // Runs on the caller's actor and enqueues before the first suspension, so main-actor
+        // calls reach the queue in the order they're made.
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[String: Any], Error>) in
             queue.async {
                 let buf = data.withUnsafeBytes { angl_bw_call(self.session, method, $0.bindMemory(to: UInt8.self).baseAddress, data.count) }

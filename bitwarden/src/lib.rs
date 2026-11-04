@@ -425,6 +425,7 @@ impl Session {
                     "totp": login.totp.is_some() && (v.premium || c.organization_use_totp),
                     "reprompt": c.reprompt == CipherRepromptType::Password,
                     "passkey": login.has_fido2,
+                    "favorite": c.favorite,
                 }))
             }));
         }

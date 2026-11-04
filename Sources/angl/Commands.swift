@@ -62,6 +62,12 @@ struct Chord {
         modifiers = m
     }
 
+    /// The key-down `event` is this chord.
+    func matches(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        return flags == modifiers && event.charactersIgnoringModifiers?.lowercased() == key.lowercased()
+    }
+
     var label: String {
         var s = ""
         if modifiers.contains(.control) { s += "⌃" }
@@ -85,6 +91,8 @@ enum Commands {
     }
 
     static func command(_ id: String) -> Command? { all.first { $0.id == id } }
+
+    static func chord(_ id: String) -> Chord? { command(id).flatMap { Chord($0.chord) } }
 
     static let all: [Command] = {
         var c: [Command] = [

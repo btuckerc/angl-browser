@@ -7,7 +7,11 @@
   const byToken = new Map();   // token → WeakRef<input>
   const tokens = new WeakMap(); // input → token
   const announced = new WeakSet();
-  let next = 0, shown = false, current = null, filling = false;
+  // `armed`: the picker has a row selected, so ↩ picks it; otherwise ↩ is the page's.
+  let next = 0, shown = false, armed = false, current = null, filling = false;
+  // The element that had focus when the window lost it (a picker search, another app): its
+  // focus coming back isn't the user arriving at the field.
+  let refocus = null;
 
   const token = (el) => {
     let t = tokens.get(el);
@@ -58,21 +62,25 @@
     } catch { exact = false; }
     return { rect: { x, y, width: r.width, height: r.height }, exact };
   };
-  // A username field's text narrows the picker; a password field's text is never sent.
+  // A username field's text narrows the picker; a password field's text is never sent, but the
+  // username shown with it is (a password step ranks that account first).
   const report = (el, how) => {
     current = el;
     announced.add(el);
     const user = !isPassword(el);
-    post({ type: 'field', field: token(el), ...rectOf(el), focused: how === 'focus', explicit: how === 'explicit', kind: user ? 'user' : 'password', query: user ? el.value : '' });
+    post({
+      type: 'field', field: token(el), ...rectOf(el), focused: how === 'focus', explicit: how === 'explicit', kind: user ? 'user' : 'password',
+      query: user ? el.value : '', username: user ? '' : (userFor(el)?.value || ''),
+      webauthn: /(^|\s)webauthn(\s|$)/i.test(el.getAttribute('autocomplete') || ''),
+    });
   };
 
-  // Page loads / SPA steps: announce the first sign-in field once (username before password).
+  // Page loads / SPA steps: offer logins for a sign-in field the page focused before this script
+  // saw it (once per field). Unfocused fields wait for focus or ⌘\.
   const scan = () => {
     if (document.visibilityState !== 'visible') return;
-    const pass = passwordIn(document);
-    const user = pass ? userFor(pass) : firstVisible(document, (el) => isUser(el) && /username|email|webauthn/.test(el.autocomplete || ''));
-    const el = user && (!pass || visible(user)) ? user : pass;
-    if (el && !el.value && !announced.has(el)) report(el, 'auto');
+    const el = document.activeElement;
+    if (el && loginField(el) && !el.value && !announced.has(el) && visible(el)) report(el, 'auto');
   };
   let timer = 0;
   const soon = () => { clearTimeout(timer); timer = setTimeout(scan, 350); };
@@ -84,22 +92,33 @@
   new MutationObserver(() => { if (!shown && document.visibilityState === 'visible') soon(); }).observe(document, { childList: true, subtree: true });
 
   // Focus offers logins only for empty fields (not after a fill, not over the page's own autofill).
-  document.addEventListener('focusin', (e) => { if (!filling && loginField(e.target) && !e.target.value) report(e.target, 'focus'); }, true);
+  addEventListener('blur', (e) => { if (e.target === window) refocus = document.activeElement; }, true);
+  document.addEventListener('focusin', (e) => {
+    const back = e.target === refocus;
+    refocus = null;
+    if (!back && !filling && loginField(e.target) && !e.target.value) report(e.target, 'focus');
+  }, true);
 
-  // While the picker is up: ↑ ↓ ↩ esc drive it; typing in its username field narrows it;
-  // scrolling, clicking away, Tab or typing anywhere else closes it.
-  const dismiss = (remember) => { if (shown) { shown = false; post({ type: 'dismiss', remember }); } };
+  // While the picker is up: ↑ ↓ esc drive it and ↩ picks the selected row; typing in its
+  // username field narrows it; scrolling, clicking away, Tab or typing anywhere else closes it.
+  const dismiss = (remember) => { if (shown) { shown = false; armed = false; post({ type: 'dismiss', remember }); } };
   const narrows = (e) => e.composedPath()[0] === current && current && !isPassword(current);
   document.addEventListener('keydown', (e) => {
-    if (!shown || !e.isTrusted) return;
+    if (!shown || !e.isTrusted || e.isComposing) return;
+    if (e.key === 'Enter' && !armed) { dismiss(false); return; }
     if (['ArrowDown', 'ArrowUp', 'Enter', 'Escape'].includes(e.key)) {
       e.preventDefault(); e.stopImmediatePropagation();
       post({ type: 'key', key: e.key });
-      if (e.key === 'Escape') shown = false;
-    } else if (e.key === 'Tab' || ((e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete') && !narrows(e))) dismiss(false);
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') armed = true;
+      if (e.key === 'Escape') { shown = false; armed = false; }
+    } else if (e.key === 'Tab' || ((e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete') && !narrows(e))) {
+      dismiss(false);
+    } else if (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete') {
+      armed = false;
+    }
   }, true);
   document.addEventListener('input', (e) => {
-    if (shown && !filling && e.isTrusted && narrows(e)) post({ type: 'query', field: token(current), query: current.value });
+    if (shown && !filling && e.isTrusted && narrows(e)) { armed = false; post({ type: 'query', field: token(current), query: current.value }); }
   }, true);
   document.addEventListener('pointerdown', (e) => { if (e.target !== current) dismiss(false); }, true);
   addEventListener('scroll', () => dismiss(false), true);
@@ -107,7 +126,7 @@
   addEventListener('pagehide', () => dismiss(false));
 
   // Native → page.
-  Object.defineProperty(window, '__anglPasswordsShown', { value: (on) => { shown = !!on; } });
+  Object.defineProperty(window, '__anglPasswordsShown', { value: (on, isArmed) => { shown = !!on; armed = shown && !!isArmed; } });
   Object.defineProperty(window, '__anglPasswordsFind', {
     value: () => {
       const active = document.activeElement;
@@ -119,6 +138,7 @@
       return true;
     },
   });
+  // → {username, password}: which of the two it wrote; false = the field is gone.
   Object.defineProperty(window, '__anglPasswordsFill', {
     value: (field, documentToken, origin, username, password) => {
       if (documentToken !== doc || origin !== location.origin) return false;
@@ -132,19 +152,19 @@
       const user = passwordTarget ? usable(userFor(el), isUser) : el;
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
       const set = (input, value) => {
-        if (!input || !value) return;
+        if (!input || !value) return false;
         input.focus();
         setter.call(input, value);
         input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertReplacementText', data: value }));
         input.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
       };
       filling = true;
       try {
-        set(user, username);
-        set(pass, password);
+        const filled = { username: set(user, username), password: set(pass, password) };
         (pass && pass.value ? pass : user)?.focus();
+        return filled;
       } finally { filling = false; }
-      return true;
     },
   });
 })();

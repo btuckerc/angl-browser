@@ -119,15 +119,22 @@ ticket. Tags are `vVERSION` and match `VERSION`.
   except the domains in *Keep signed in* (default google.com, youtube.com).
 - **Passwords** (Settings › Passwords): Bitwarden built in (the official Bitwarden SDK runs
   in-process; bitwarden.com, bitwarden.eu, or a self-hosted Bitwarden or Vaultwarden server —
-  pick *Self-hosted* in the login sheet and enter its address) and Apple Passwords. On a
-  sign-in page a picker drops under the field — *Log in to Bitwarden…* / *Unlock Bitwarden…*,
-  then the logins matching the frame's site (Bitwarden's URI match rules and equivalent
-  domains). Past eight logins the list scrolls (*Apple Passwords…* stays pinned below it), and
-  typing in the username field narrows it by name or username; ↑ ↓ ↩ esc work while it is
-  up. **⌘\\** offers logins on demand. Picking fills
+  pick *Self-hosted* in the login sheet and enter its address) and Apple Passwords. Focusing a
+  sign-in field drops a picker under it — *Log in to Bitwarden…* / *Unlock Bitwarden…*, then
+  the logins Bitwarden matches to the frame (its URI match rules and equivalent domains),
+  this host's own first, then *Other logins on* the domain, URI-rule and equivalent-site
+  matches under their own headings; within each, the account the page already shows, then the
+  login last filled here, favorites, name. Rows show the site's icon, name, username and where
+  the login is saved when that isn't this host. A login for this very host is preselected, so
+  **↩** fills it; otherwise ↩ stays the page's until ↓ picks a row. Typing in the username
+  field narrows the list (and takes the selection away); ↑ ↓ esc work while it is up.
+  **⌘\\** offers logins on demand; again (or *Search Bitwarden…*) searches the whole vault by
+  name, username or site. Filling a login saved for another site asks first (*Fill Once*;
+  the login isn't changed). Picking fills
   username and password (never submits), asks for the master password first on re-prompt
-  logins, and copies the TOTP code if there is one (**Copy one-time code after filling** turns
-  that off). Two-step login takes authenticator, email and YubiKey OTP codes; for Duo or
+  logins, and copies the TOTP code if there is one and the password was filled (**Copy
+  one-time code after filling** turns that off). Which login was last filled is kept per
+  profile (IDs and times only) for the ordering. Two-step login takes authenticator, email and YubiKey OTP codes; for Duo or
   security keys log in with a personal API key. The encrypted vault is cached in the profile,
   so unlocking works offline, and syncs when the server reports a change. Keys stay in memory
   (with **Remember unlock**, also sealed to the Secure Enclave and opened by Touch ID or the
@@ -137,8 +144,10 @@ ticket. Tags are `vVERSION` and match `VERSION`.
 - **Passkeys** come from Bitwarden: a site's passkey sign-in or registration opens a native
   sheet (choose the passkey, or the login to save a new one in) and Touch ID or the login
   password; Bitwarden's SDK checks the site against its origin and signs. New passkeys are
-  saved to the server before the site gets them. Requests Bitwarden can't serve (no passkey
-  for the site, Bitwarden off, autofill-style conditional requests) go to WebKit.
+  saved to the server before the site gets them. Passkey autofill (a site's conditional
+  request with an `autocomplete="… webauthn"` field) lists the site's passkeys at the top of
+  the login picker; picking one asks for Touch ID and signs in. Requests Bitwarden can't serve
+  (no passkey for the site, Bitwarden off, conditional registration) go to WebKit.
 - **Ad blocker**: AdGuard Base + Tracking Protection (Safari-optimized lists, converted
   by AdGuard's SafariConverterLib into WebKit content rules) plus AdGuard Scriptlets and
   cosmetic rules for sites such as YouTube. Settings › Privacy › Content-blocking lists picks lists (toggling one
