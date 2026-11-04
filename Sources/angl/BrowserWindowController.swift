@@ -776,25 +776,6 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         status.show(url.map { Omnibox.display($0) }, from: t)
     }
 
-    /// One passkey bar at a time: a page that retries a failed passkey shouldn't stack copies.
-    private var passkeyAsking = false
-
-    func passkeyFailed(in t: Tab) {
-        guard !passkeyAsking, let url = t.url, let host = SiteStore.key(for: url), let safari = Engine.engine(id: "safari") else { return }
-        passkeyAsking = true
-        Task { @MainActor in
-            defer { passkeyAsking = false }
-            let i = await permissionBar.ask("passkeys need Safari (angl has no passkey entitlement)",
-                                            buttons: ["Open in Safari", "Always for \(host)", "Dismiss"], owner: self)
-            if i == 0 || i == 1 { _ = await Handoff.open(url, in: safari) }
-            if i == 1 {
-                var rules = browser.settings.engines.rules
-                rules.append(EngineRule(match: URLRule(.host, host), engine: "safari"))
-                try? browser.setSetting(path: "engines.rules", value: try PageCommands.json(rules))
-            }
-        }
-    }
-
     func askPermission(for t: Tab, text: String) async -> (allow: Bool, remember: Bool) {
         if t !== active { activate(t) }
         let i = await permissionBar.ask(text, buttons: ["Allow once", "Allow", "Block"], owner: self)

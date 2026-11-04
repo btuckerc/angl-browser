@@ -27,7 +27,7 @@ final class Passwords: NSObject {
         var query: String
     }
 
-    private lazy var bitwarden: Bitwarden = {
+    private(set) lazy var bitwarden: Bitwarden = {
         let paths = Browser.shared.paths
         let b = Bitwarden(dir: paths.stateDir.appendingPathComponent("bitwarden"), profile: paths.profile)
         b.onChange = { [weak self] in self?.vaultChanged() }
@@ -59,8 +59,8 @@ final class Passwords: NSObject {
         }
     }
 
-    private var settings: Settings.Passwords { Browser.shared.settings.passwords }
-    private var useBitwarden: Bool { settings.provider == .bitwarden }
+    var settings: Settings.Passwords { Browser.shared.settings.passwords }
+    var useBitwarden: Bool { settings.provider == .bitwarden }
     /// Any source on: passwords.js runs and the picker can appear.
     var enabled: Bool { useBitwarden || settings.applePasswords }
 
@@ -72,12 +72,6 @@ final class Passwords: NSObject {
     }
 
     // MARK: Page hooks
-
-    func install(on controller: WKUserContentController) {
-        guard enabled, let url = Bundle.main.url(forResource: "passwords", withExtension: "js", subdirectory: "web/inject"),
-              let source = try? String(contentsOf: url, encoding: .utf8) else { return }
-        controller.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: false, in: Self.world))
-    }
 
     /// ⌘\ — offer logins for the page's focused (or first) sign-in field; falls back to the last
     /// field reported in this tab (sign-ins inside frames).
@@ -264,7 +258,7 @@ final class Passwords: NSObject {
     }
 
     /// Runs one account flow (log in, unlock, Touch ID); a second one while it's up is ignored.
-    private func exclusive(_ flow: () async -> Void) async {
+    func exclusive(_ flow: () async -> Void) async {
         guard !inFlow else { return }
         inFlow = true
         defer { inFlow = false }
@@ -315,15 +309,18 @@ final class Passwords: NSObject {
         }
     }
 
-    /// Bitwarden's "master password re-prompt" before filling a protected login.
-    private func reprompt(in window: NSWindow, message: String? = nil) async -> Bool {
+    /// Bitwarden's "master password re-prompt" before using a protected login.
+    func reprompt(in window: NSWindow, message: String? = nil, reason: String = "This login asks for it before filling.",
+                  action: String = "Fill") async -> Bool {
         let pw = Sheet.secure(.password)
-        let button = await Sheet.ask("Confirm your master password", message ?? "This login asks for it before filling.",
-                                     [("Master password", pw)], buttons: ["Fill", "Cancel"], in: window)
+        let button = await Sheet.ask("Confirm your master password", message ?? reason,
+                                     [("Master password", pw)], buttons: [action, "Cancel"], in: window)
         let password = Sheet.take(pw)
         guard button == 0, !password.isEmpty else { return false }
         do {
-            guard try await bitwarden.verify(password) else { return await reprompt(in: window, message: "Wrong master password") }
+            guard try await bitwarden.verify(password) else {
+                return await reprompt(in: window, message: "Wrong master password", reason: reason, action: action)
+            }
             return true
         } catch {
             fail(error)
@@ -355,6 +352,21 @@ final class Passwords: NSObject {
     }
 
     // MARK: Unlock
+
+    /// Unlocks a locked vault for a request that needs it (a passkey): Touch ID when a key is
+    /// remembered, else the master password. Returns once the flow ends; false = still not unlocked.
+    func unlockVault(in window: NSWindow) async -> Bool {
+        if bitwarden.state == .locked {
+            await exclusive {
+                if settings.rememberUnlock, SealedKey.available, Keychain.exists(rememberedKey) {
+                    await restoreRemembered(in: window, then: nil)
+                } else {
+                    await unlockSheet(in: window, then: nil)
+                }
+            }
+        }
+        return bitwarden.state == .unlocked
+    }
 
     /// `epoch` is `bitwarden.epoch` from before the first sheet; a lock or logout since cancels.
     private func unlockSheet(in window: NSWindow, then t: Target?, epoch: UInt64? = nil, message: String? = nil) async {
@@ -401,7 +413,7 @@ final class Passwords: NSObject {
 
     /// Remembered unlock: the user key sealed to the Secure Enclave, opened by Touch ID (or the
     /// login password). A stale key (master password changed) falls back to the password sheet.
-    private func restoreRemembered(in window: NSWindow, then t: Target) async {
+    private func restoreRemembered(in window: NSWindow, then t: Target?) async {
         let epoch = bitwarden.epoch
         let sealed: Data?
         do { sealed = try Keychain.read(rememberedKey) } catch { return fail(error) }
@@ -571,14 +583,14 @@ final class Passwords: NSObject {
         return tab.owner.active === tab
     }
 
-    private func fail(_ error: Error) {
+    func fail(_ error: Error) {
         if error is CancellationError { return }
         closePicker()
         (target?.tab?.owner ?? (NSApp.keyWindow?.windowController as? BrowserWindowController))?
             .toast(String(error.localizedDescription.prefix(120)), color: Browser.shared.style.warn)
     }
 
-    private func toast(_ text: String, in window: NSWindow, color: NSColor = Browser.shared.style.secondary) {
+    func toast(_ text: String, in window: NSWindow, color: NSColor = Browser.shared.style.secondary) {
         (window.windowController as? BrowserWindowController)?.toast(text, color: color)
     }
 
@@ -626,7 +638,7 @@ private enum Row {
 
 /// Small native forms as alert sheets.
 @MainActor
-private enum Sheet {
+enum Sheet {
     /// Shows the sheet; returns the index of the button that closed it. `shown` runs once it's up.
     static func ask(_ title: String, _ info: String, _ rows: [(String, NSView)], buttons: [String], in window: NSWindow,
                     focus: NSView? = nil, shown: (() -> Void)? = nil) async -> Int {

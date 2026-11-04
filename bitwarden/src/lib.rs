@@ -9,9 +9,12 @@ use std::{
     ffi::{CStr, c_char},
     num::NonZeroU32,
     panic::{AssertUnwindSafe, catch_unwind},
+    sync::Mutex,
 };
 
-use bitwarden_api_api::models::{CipherDetailsResponseModel, DomainsResponseModel, ProfileResponseModel, UserDecryptionResponseModel};
+use bitwarden_api_api::models::{
+    CipherDetailsResponseModel, CipherRequestModel, DomainsResponseModel, ProfileResponseModel, UserDecryptionResponseModel,
+};
 use bitwarden_core::{
     Client, OrganizationId, UserId,
     key_management::{
@@ -21,7 +24,21 @@ use bitwarden_core::{
     },
 };
 use bitwarden_crypto::{EncString, HashPurpose, Kdf, MasterKey, SymmetricCryptoKey, UnsignedSharedKey};
-use bitwarden_vault::{Cipher, CipherListViewType, CipherRepromptType, VaultClientExt};
+use bitwarden_fido::{
+    CheckUserOptions, CheckUserResult, ClientData, ClientFido2Ext, Fido2CallbackError, Fido2ClientError, Fido2CredentialStore,
+    Fido2UserInterface, Origin, UiHint, string_to_guid_bytes,
+};
+use bitwarden_vault::{
+    Cipher, CipherListView, CipherListViewType, CipherRepromptType, CipherType, CipherView, EncryptionContext,
+    Fido2CredentialNewView, LoginUriView, LoginView, VaultClientExt,
+};
+use passkey::{
+    client::WebauthnError,
+    types::{
+        Bytes, crypto::sha256, encoding::base64url,
+        webauthn::{ClientDataType, CollectedClientData},
+    },
+};
 use serde::{Deserialize, de::IgnoredAny};
 use serde_json::{Value, json, value::RawValue};
 
@@ -146,6 +163,42 @@ struct PasswordIn {
     password: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PasskeysIn {
+    rp_id: String,
+    /// The request's allowCredentials; empty = any of the RP's passkeys.
+    #[serde(default)]
+    ids: Vec<Bytes>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Fido2In {
+    /// "create" or "get".
+    op: String,
+    /// The requesting frame's origin as WebKit reports it, never as the page claims it.
+    origin: String,
+    /// `{"publicKey": …}` as the page passed it, byte fields base64url.
+    request: Box<RawValue>,
+    /// get: the passkey's item. create: the login to add the passkey to; none = a new login.
+    cipher_id: Option<String>,
+    /// The user passed Touch ID or the login password for this request.
+    verified: bool,
+}
+
+/// Only the challenge, to build the client data the passkey client will sign over.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChallengeIn {
+    public_key: ChallengeOnly,
+}
+
+#[derive(Deserialize)]
+struct ChallengeOnly {
+    challenge: Bytes,
+}
+
 fn parse<'a, T: Deserialize<'a>>(input: &'a [u8]) -> Result<T, Fail> {
     serde_json::from_slice(input).map_err(|e| fail("input", e))
 }
@@ -164,6 +217,8 @@ impl Session {
             "login" => self.login(parse(input)?),
             "verify" => self.verify(parse(input)?),
             "userKey" => self.user_key(),
+            "passkeys" => self.passkeys(parse(input)?),
+            "fido2" => self.fido2(parse(input)?),
             m => Err(fail("input", format!("unknown method {m}"))),
         }
     }
@@ -369,6 +424,7 @@ impl Session {
                     "uris": uris,
                     "totp": login.totp.is_some() && (v.premium || c.organization_use_totp),
                     "reprompt": c.reprompt == CipherRepromptType::Password,
+                    "passkey": login.has_fido2,
                 }))
             }));
         }
@@ -408,6 +464,327 @@ impl Session {
         self.unlocked_vault()?;
         let key = pollster::block_on(self.client.crypto().get_user_encryption_key()).map_err(|e| fail("crypto", e))?;
         Ok(json!({ "key": key.to_string() }))
+    }
+
+    /// The RP's passkeys (narrowed to `ids` when the request lists some), one row per item.
+    fn passkeys(&self, p: PasskeysIn) -> Out {
+        let v = self.unlocked_vault()?;
+        let ids: Vec<Vec<u8>> = p.ids.into_iter().map(Into::into).collect();
+        let found = pollster::block_on(passkey_ciphers(&self.client, v, &p.rp_id, Some(&ids)));
+        let items: Vec<Value> = found
+            .into_iter()
+            .filter_map(|(_, c)| {
+                let CipherListViewType::Login(login) = &c.r#type else { return None };
+                let cred = login.fido2_credentials.iter().flatten().find(|f| f.rp_id.eq_ignore_ascii_case(&p.rp_id))?;
+                let user = cred.user_name.clone().or_else(|| cred.user_display_name.clone()).or_else(|| login.username.clone());
+                Some(json!({
+                    "id": c.id?.to_string(),
+                    "name": c.name,
+                    "userName": user.unwrap_or_default(),
+                    "reprompt": c.reprompt == CipherRepromptType::Password,
+                }))
+            })
+            .collect();
+        Ok(json!({ "items": items }))
+    }
+
+    /// One WebAuthn ceremony through the SDK's passkey client (origin and RP ID checks,
+    /// signing), with the user's choices already made in angl's UI. Returns the credential for
+    /// the page and, when the vault item changed (a new passkey, a counter bump), the request
+    /// that saves it; the caller sends that to the server.
+    fn fido2(&self, f: Fido2In) -> Out {
+        let v = self.unlocked_vault()?;
+        let create = match f.op.as_str() {
+            "create" => true,
+            "get" => false,
+            op => return Err(fail("input", format!("unknown op {op}"))),
+        };
+        let origin = url::Url::parse(&f.origin).map_err(|e| fail("input", e))?;
+        let challenge: ChallengeIn = serde_json::from_str(f.request.get()).map_err(|e| fail("syntax", e))?;
+        // The client data passkey-rs builds for this origin and challenge. The only web-shaped
+        // mode the SDK offers takes the hash from the caller, so hash it here and check below
+        // that the client returned these exact bytes.
+        let client_data = CollectedClientData::<()> {
+            ty: if create { ClientDataType::Create } else { ClientDataType::Get },
+            challenge: base64url(&challenge.public_key.challenge),
+            origin: origin.as_str().trim_end_matches('/').to_owned(),
+            cross_origin: None,
+            extra_data: (),
+            unknown_keys: Default::default(),
+        };
+        let client_data_json = serde_json::to_vec(&client_data).map_err(|e| fail("input", e))?;
+        let data = ClientData::DefaultWithCustomHash { hash: sha256(&client_data_json).to_vec() };
+        let store = Store { client: &self.client, vault: v, saved: Mutex::new(None) };
+        let ui = Ui {
+            client: &self.client,
+            vault: v,
+            cipher_id: f.cipher_id.map(|id| id.to_ascii_lowercase()),
+            origin: client_data.origin.clone(),
+            verified: f.verified,
+        };
+        let fido2 = self.client.fido2();
+        let mut client = fido2.create_client(&ui, &store);
+        let web = Origin::Web(origin.to_string());
+        let request = f.request.get().to_owned();
+        let (credential, signed) = if create {
+            let r = pollster::block_on(client.register(web, request, data)).map_err(webauthn_fail)?;
+            let credential = json!({
+                "id": r.id,
+                "rawId": base64url(&r.raw_id),
+                "type": r.ty,
+                "authenticatorAttachment": r.authenticator_attachment,
+                "clientExtensionResults": extension_results(r.client_extension_results.cred_props.and_then(|c| c.rk)),
+                "response": {
+                    "clientDataJSON": base64url(&r.response.client_data_json),
+                    "attestationObject": base64url(&r.response.attestation_object),
+                    "authenticatorData": base64url(&r.response.authenticator_data),
+                    "publicKey": r.response.public_key.as_deref().map(base64url),
+                    "publicKeyAlgorithm": r.response.public_key_algorithm,
+                    "transports": r.response.transports,
+                },
+            });
+            (credential, r.response.client_data_json)
+        } else {
+            let r = pollster::block_on(client.authenticate(web, request, data)).map_err(webauthn_fail)?;
+            let credential = json!({
+                "id": r.id,
+                "rawId": base64url(&r.raw_id),
+                "type": r.ty,
+                "authenticatorAttachment": r.authenticator_attachment,
+                "clientExtensionResults": extension_results(r.client_extension_results.cred_props.and_then(|c| c.rk)),
+                "response": {
+                    "clientDataJSON": base64url(&r.response.client_data_json),
+                    "authenticatorData": base64url(&r.response.authenticator_data),
+                    "signature": base64url(&r.response.signature),
+                    "userHandle": base64url(&r.response.user_handle),
+                },
+            });
+            (credential, r.response.client_data_json)
+        };
+        if signed != client_data_json {
+            return Err(fail("internal", "passkey client data differs from what was signed"));
+        }
+        drop(client);
+        let save = store.saved.into_inner().unwrap_or_else(|e| e.into_inner()).map(|ctx| {
+            let id = ctx.cipher.id.map(|id| id.to_string());
+            json!({ "cipherId": id, "request": CipherRequestModel::from(ctx) })
+        });
+        Ok(json!({ "credential": credential, "save": save }))
+    }
+}
+
+fn extension_results(rk: Option<bool>) -> Value {
+    match rk {
+        Some(rk) => json!({ "credProps": { "rk": rk } }),
+        None => json!({}),
+    }
+}
+
+/// Error kinds Swift maps to the DOMException names WebAuthn specifies.
+fn webauthn_fail(e: Fido2ClientError) -> Fail {
+    use WebauthnError as W;
+    let kind = match &e {
+        // CTAP2_ERR_CREDENTIAL_EXCLUDED: the vault already holds one of excludeCredentials.
+        Fido2ClientError::Webauthn(W::AuthenticatorError(0x19)) => "excluded",
+        Fido2ClientError::Webauthn(
+            W::OriginMissingDomain
+            | W::OriginRpMissmatch
+            | W::UnprotectedOrigin
+            | W::InsecureLocalhostNotAllowed
+            | W::InvalidRpId
+            | W::RequiresRelatedOriginsSupport
+            | W::ExceedsMaxLabelLimit,
+        ) => "security",
+        Fido2ClientError::Webauthn(W::NotSupportedError) => "notSupported",
+        Fido2ClientError::InvalidOrigin(_) => "security",
+        Fido2ClientError::Serde(_) | Fido2ClientError::Webauthn(W::SyntaxError | W::ValidationError) => "syntax",
+        _ => "notAllowed",
+    };
+    fail(kind, e)
+}
+
+/// Logins holding a passkey for `rp_id` (and, when `ids` lists any, one of those credentials):
+/// their index in `v.ciphers` and list view. Only items whose sync JSON carries passkeys are
+/// decrypted, and of those only names and passkey metadata.
+async fn passkey_ciphers(client: &Client, v: &Vault, rp_id: &str, ids: Option<&[Vec<u8>]>) -> Vec<(usize, CipherListView)> {
+    #[derive(Deserialize)]
+    struct Head {
+        #[serde(alias = "Login")]
+        login: Option<LoginHead>,
+    }
+    #[derive(Deserialize)]
+    struct LoginHead {
+        #[serde(rename = "fido2Credentials", alias = "Fido2Credentials")]
+        fido2: Option<Vec<IgnoredAny>>,
+    }
+    let ids = ids.filter(|ids| !ids.is_empty());
+    let wanted = |c: &CipherListView| {
+        let CipherListViewType::Login(login) = &c.r#type else { return false };
+        login.fido2_credentials.iter().flatten().any(|f| {
+            f.rp_id.eq_ignore_ascii_case(rp_id)
+                && ids.is_none_or(|ids| string_to_guid_bytes(&f.credential_id).is_ok_and(|id| ids.contains(&id)))
+        })
+    };
+    let candidates: Vec<Cipher> = v
+        .ciphers
+        .iter()
+        .filter(|raw| {
+            serde_json::from_str::<Head>(raw).is_ok_and(|h| h.login.and_then(|l| l.fido2).is_some_and(|f| !f.is_empty()))
+        })
+        .filter_map(|raw| cipher(raw).ok())
+        .collect();
+    let result = client.vault().ciphers().decrypt_list_with_failures(candidates).await;
+    result
+        .successes
+        .into_iter()
+        .filter(wanted)
+        .filter_map(|c| Some((*v.by_id.get(&c.id?.to_string())?, c)))
+        .collect()
+}
+
+/// The vault as the SDK's authenticator sees it. A save is held for the caller to upload.
+struct Store<'a> {
+    client: &'a Client,
+    vault: &'a Vault,
+    saved: Mutex<Option<EncryptionContext>>,
+}
+
+fn callback_fail(e: impl std::fmt::Display) -> Fido2CallbackError {
+    Fido2CallbackError::Unknown(e.to_string())
+}
+
+async fn decrypt(client: &Client, v: &Vault, n: usize) -> Result<CipherView, Fido2CallbackError> {
+    let c = cipher(&v.ciphers[n]).map_err(|f| callback_fail(f.message))?;
+    client.vault().ciphers().decrypt(c).await.map_err(callback_fail)
+}
+
+#[async_trait::async_trait]
+impl Fido2CredentialStore for Store<'_> {
+    async fn find_credentials(
+        &self,
+        ids: Option<Vec<Vec<u8>>>,
+        rp_id: String,
+        _user_handle: Option<Vec<u8>>,
+    ) -> Result<Vec<CipherView>, Fido2CallbackError> {
+        let mut views = Vec::new();
+        for (n, _) in passkey_ciphers(self.client, self.vault, &rp_id, ids.as_deref()).await {
+            views.push(decrypt(self.client, self.vault, n).await?);
+        }
+        Ok(views)
+    }
+
+    /// Only the OS credential-provider flows list everything; angl never asks.
+    async fn all_credentials(&self) -> Result<Vec<CipherListView>, Fido2CallbackError> {
+        Ok(Vec::new())
+    }
+
+    async fn save_credential(&self, cred: EncryptionContext) -> Result<(), Fido2CallbackError> {
+        *self.saved.lock().unwrap_or_else(|e| e.into_inner()) = Some(cred);
+        Ok(())
+    }
+}
+
+/// angl's UI already ran: the picked item, and whether the user verified. Presence is the
+/// click that started the ceremony.
+struct Ui<'a> {
+    client: &'a Client,
+    vault: &'a Vault,
+    cipher_id: Option<String>,
+    origin: String,
+    verified: bool,
+}
+
+impl Ui<'_> {
+    fn result(&self) -> CheckUserResult {
+        CheckUserResult { user_present: true, user_verified: self.verified }
+    }
+}
+
+#[async_trait::async_trait]
+impl Fido2UserInterface for Ui<'_> {
+    async fn check_user<'a>(&self, _options: CheckUserOptions, _hint: UiHint<'a, CipherView>) -> Result<CheckUserResult, Fido2CallbackError> {
+        Ok(self.result())
+    }
+
+    async fn pick_credential_for_authentication(&self, available: Vec<CipherView>) -> Result<CipherView, Fido2CallbackError> {
+        let id = self.cipher_id.as_deref().ok_or(Fido2CallbackError::OperationCancelled)?;
+        available
+            .into_iter()
+            .find(|c| c.id.is_some_and(|c| c.to_string() == id))
+            .ok_or(Fido2CallbackError::OperationCancelled)
+    }
+
+    async fn check_user_and_pick_credential_for_creation(
+        &self,
+        _options: CheckUserOptions,
+        new: Fido2CredentialNewView,
+    ) -> Result<(CipherView, CheckUserResult), Fido2CallbackError> {
+        let view = match &self.cipher_id {
+            Some(id) => {
+                let &n = self.vault.by_id.get(id).ok_or(Fido2CallbackError::OperationCancelled)?;
+                let view = decrypt(self.client, self.vault, n).await?;
+                // An item holds one passkey; never replace one.
+                let taken = view.login.as_ref().is_none_or(|l| l.fido2_credentials.as_ref().is_some_and(|f| !f.is_empty()));
+                if taken || !view.edit {
+                    return Err(Fido2CallbackError::Unknown("that login can't take a passkey".into()));
+                }
+                view
+            }
+            None => new_login(&new, &self.origin),
+        };
+        Ok((view, self.result()))
+    }
+
+    fn is_verification_enabled(&self) -> bool {
+        true
+    }
+}
+
+/// A personal login for a passkey that goes in no existing item: named for the site, the
+/// passkey's user name as username, the requesting origin as its URI.
+fn new_login(new: &Fido2CredentialNewView, origin: &str) -> CipherView {
+    let now = chrono::Utc::now();
+    CipherView {
+        id: None,
+        organization_id: None,
+        folder_id: None,
+        collection_ids: Vec::new(),
+        key: None,
+        name: new.rp_name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| new.rp_id.clone()),
+        notes: None,
+        r#type: CipherType::Login,
+        login: Some(LoginView {
+            username: new.user_name.clone(),
+            password: None,
+            password_revision_date: None,
+            uris: Some(vec![LoginUriView { uri: Some(origin.to_owned()), r#match: None, uri_checksum: None }]),
+            totp: None,
+            autofill_on_page_load: None,
+            fido2_credentials: None,
+        }),
+        identity: None,
+        card: None,
+        secure_note: None,
+        ssh_key: None,
+        bank_account: None,
+        drivers_license: None,
+        passport: None,
+        favorite: false,
+        reprompt: CipherRepromptType::None,
+        organization_use_totp: false,
+        edit: true,
+        permissions: None,
+        view_password: true,
+        local_data: None,
+        attachments: None,
+        attachment_decryption_failures: None,
+        fields: None,
+        password_history: None,
+        creation_date: now,
+        deleted_date: None,
+        revision_date: now,
+        archived_date: None,
+        partial: false,
     }
 }
 
@@ -462,5 +839,119 @@ pub unsafe extern "C" fn angl_bw_call(session: *mut Session, method: *const c_ch
 pub unsafe extern "C" fn angl_bw_buf_free(buf: AnglBwBuf) {
     if !buf.ptr.is_null() {
         drop(unsafe { Vec::from_raw_parts(buf.ptr, buf.len, buf.cap) });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bitwarden_crypto::UserKey;
+    use p256::{
+        ecdsa::{Signature, VerifyingKey, signature::Verifier},
+        pkcs8::DecodePublicKey,
+    };
+
+    use super::*;
+
+    const EMAIL: &str = "passkeys@example.com";
+    const PASSWORD: &str = "correct horse battery staple";
+    const USER: &str = "8b4cfbd5-5f45-4b56-9b6b-6b1e2f0c1a11";
+
+    /// A one-account sync body: the user key under the master key, an RSA key pair under the
+    /// user key, and `ciphers` as the server lists them.
+    fn sync(protected_key: &EncString, private_key: &EncString, ciphers: Vec<Value>) -> Value {
+        json!({
+            "profile": { "id": USER, "email": EMAIL, "key": protected_key.to_string(), "privateKey": private_key.to_string() },
+            "ciphers": ciphers,
+        })
+    }
+
+    fn call(s: &mut Session, method: &str, input: Value) -> Result<Value, String> {
+        s.call(method, &serde_json::to_vec(&input).unwrap()).map_err(|f| format!("{}: {}", f.kind, f.message))
+    }
+
+    fn bytes(s: &Value) -> Vec<u8> {
+        serde_json::from_value::<Bytes>(s.clone()).unwrap().into()
+    }
+
+    /// Register a passkey into a new login, list it back after a re-sync, sign in with it, and
+    /// verify the assertion under the registered key over the client data the page receives.
+    #[test]
+    fn passkey_round_trip() {
+        let kdf = Kdf::PBKDF2 { iterations: NonZeroU32::new(5_000).unwrap() };
+        let master = MasterKey::derive(PASSWORD, EMAIL, &kdf).unwrap();
+        let (user_key, protected_key) = master.make_user_key().unwrap();
+        let private_key = UserKey::new(user_key.0.clone()).make_key_pair().unwrap().private;
+
+        let mut s = Session::new();
+        call(&mut s, "load", sync(&protected_key, &private_key, vec![])).unwrap();
+        call(&mut s, "unlock", json!({ "password": PASSWORD, "kdf": { "type": 0, "iterations": 5_000 } })).unwrap();
+
+        let origin = "https://login.example.com";
+        let created = call(&mut s, "fido2", json!({
+            "op": "create",
+            "origin": origin,
+            "verified": true,
+            "request": { "publicKey": {
+                "rp": { "id": "example.com", "name": "Example" },
+                "user": { "id": base64url(b"user-1"), "name": "alice", "displayName": "Alice" },
+                "challenge": base64url(b"create-challenge"),
+                "pubKeyCredParams": [{ "type": "public-key", "alg": -7 }],
+                "authenticatorSelection": { "residentKey": "required", "userVerification": "required" },
+            } },
+        }))
+        .unwrap();
+        let response = &created["credential"]["response"];
+        let client_data: Value = serde_json::from_slice(&bytes(&response["clientDataJSON"])).unwrap();
+        assert_eq!(client_data["type"], "webauthn.create");
+        assert_eq!(client_data["origin"], origin);
+        assert_eq!(client_data["challenge"], base64url(b"create-challenge"));
+        let public_key = VerifyingKey::from_public_key_der(&bytes(&response["publicKey"])).unwrap();
+        let save = &created["save"];
+        assert!(save["cipherId"].is_null(), "saved as a new login");
+
+        // The server's copy of the saved item, as the next sync lists it.
+        let id = "0f8a3a4e-3f6d-4c1b-9a59-6d2b1f9e7c21";
+        let now = "2026-11-04T12:00:00.000Z";
+        let mut item = save["request"].clone();
+        for (k, v) in [("id", json!(id)), ("object", json!("cipherDetails")), ("edit", json!(true)), ("viewPassword", json!(true)),
+                       ("creationDate", json!(now)), ("revisionDate", json!(now))] {
+            item[k] = v;
+        }
+        call(&mut s, "load", sync(&protected_key, &private_key, vec![item])).unwrap();
+
+        let listed = call(&mut s, "passkeys", json!({ "rpId": "example.com" })).unwrap();
+        assert_eq!(listed["items"], json!([{ "id": id, "name": "Example", "userName": "alice", "reprompt": false }]));
+        let others = call(&mut s, "passkeys", json!({ "rpId": "example.com", "ids": [base64url(b"someone else")] })).unwrap();
+        assert_eq!(others["items"], json!([]));
+        let allowed = call(&mut s, "passkeys", json!({ "rpId": "example.com", "ids": [created["credential"]["rawId"]] })).unwrap();
+        assert_eq!(allowed["items"].as_array().map(Vec::len), Some(1));
+
+        let got = call(&mut s, "fido2", json!({
+            "op": "get",
+            "origin": origin,
+            "verified": true,
+            "cipherId": id,
+            "request": { "publicKey": { "rpId": "example.com", "challenge": base64url(b"get-challenge"), "userVerification": "required" } },
+        }))
+        .unwrap();
+        let response = &got["credential"]["response"];
+        assert_eq!(got["credential"]["rawId"], created["credential"]["rawId"]);
+        assert_eq!(bytes(&response["userHandle"]), b"user-1");
+        let client_data_json = bytes(&response["clientDataJSON"]);
+        let client_data: Value = serde_json::from_slice(&client_data_json).unwrap();
+        assert_eq!(client_data["type"], "webauthn.get");
+        assert_eq!(client_data["origin"], origin);
+        assert_eq!(client_data["challenge"], base64url(b"get-challenge"));
+        let mut signed = bytes(&response["authenticatorData"]);
+        signed.extend_from_slice(&sha256(&client_data_json));
+        let signature = Signature::from_der(&bytes(&response["signature"])).unwrap();
+        public_key.verify(&signed, &signature).expect("the assertion verifies under the registered key");
+
+        // A page can't claim an RP ID its origin doesn't belong to.
+        let foreign = call(&mut s, "fido2", json!({
+            "op": "get", "origin": "https://example.net", "verified": true, "cipherId": id,
+            "request": { "publicKey": { "rpId": "example.com", "challenge": base64url(b"x") } },
+        }));
+        assert!(foreign.as_ref().is_err_and(|e| e.starts_with("security")), "{foreign:?}");
     }
 }

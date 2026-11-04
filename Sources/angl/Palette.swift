@@ -451,11 +451,10 @@ final class SidebarPaletteHeader: FlatView, NSGestureRecognizerDelegate {
         let text = o.active?.url.map(Omnibox.display) ?? ""
         let a = NSMutableAttributedString(string: text, attributes: [.font:o.style.monoSmall,.foregroundColor:o.style.secondary])
         if let host = o.active?.url?.host(), let range = text.range(of: host) { a.addAttribute(.foregroundColor, value:o.style.primary, range:NSRange(range,in:text)) }
-        url.attributedStringValue = a; url.lineBreakMode = .byTruncatingTail
+        if url.attributedStringValue != a { url.attributedStringValue = a; url.lineBreakMode = .byTruncatingTail; needsLayout = true }
         let web = o.active?.url.map { $0.scheme == "http" || $0.scheme == "https" } ?? false
         site.isEnabled = web
         site.tint = (o.active?.url.map { !Browser.shared.policy(for: $0).javascript } ?? false) && web ? o.style.warn : o.style.secondary
-        needsLayout = true
     }
     /// Row 1: traffic-light gap + back/forward/reload (a window drag area). Row 2: the address pill.
     static let height: CGFloat = 36 + 30

@@ -134,6 +134,11 @@ ticket. Tags are `vVERSION` and match `VERSION`.
   login password); Edit › Lock Bitwarden or idle/screen lock drops them from memory.
   *Apple Passwords…* opens a native sheet with the system AutoFill picker and
   fills what you choose there. Settings › Passwords turns either off.
+- **Passkeys** come from Bitwarden: a site's passkey sign-in or registration opens a native
+  sheet (choose the passkey, or the login to save a new one in) and Touch ID or the login
+  password; Bitwarden's SDK checks the site against its origin and signs. New passkeys are
+  saved to the server before the site gets them. Requests Bitwarden can't serve (no passkey
+  for the site, Bitwarden off, autofill-style conditional requests) go to WebKit.
 - **Ad blocker**: AdGuard Base + Tracking Protection (Safari-optimized lists, converted
   by AdGuard's SafariConverterLib into WebKit content rules) plus AdGuard Scriptlets and
   cosmetic rules for sites such as YouTube. Settings › Privacy › Content-blocking lists picks lists (toggling one
@@ -175,8 +180,8 @@ Profiles are separate instances: `open -na angl --args --profile NAME`.
 
 ## Limits
 
-- Passkeys need an entitlement only Apple-reviewed browsers get: a failed passkey
-  prompt offers "Open in Safari" and can remember that per host.
+- Passkeys are Bitwarden's only: iCloud Keychain passkeys, phone (QR) sign-in and hardware
+  security keys need an entitlement Apple grants browsers on request.
 - No extensions. Find has no match count. Volume only attenuates, and only the page's
   audio/video elements (not WebAudio or detached `Audio()` objects); mute covers everything.
 - Night audio covers Media Source video with one audio stream at 1× speed. Other media

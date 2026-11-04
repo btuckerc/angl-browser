@@ -1,7 +1,7 @@
 import Foundation
 
 /// "Engines": angl renders with WebKit; other installed browsers are engines a tab or a site
-/// can be handed to (Chromium for a site that only works there, Safari for passkeys).
+/// can be handed to (Chromium for a site that only works there).
 public struct Engine: Equatable, Sendable, Identifiable {
     public var id: String
     public var name: String

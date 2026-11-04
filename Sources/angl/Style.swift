@@ -44,18 +44,25 @@ struct Style {
 
     func workspaceColor(_ hex: String) -> NSColor { Style.color(hex) }
 
-    /// A 14pt glyph image: SF Symbol by default, tinted by the caller.
+    /// A 14pt glyph image: SF Symbol by default, tinted by the caller. Shared per name, size and
+    /// weight, so views that set the same glyph again see the same image and don't redraw.
     func symbol(_ name: String, size: CGFloat? = nil, weight: NSFont.Weight = .regular) -> NSImage? {
-        let cfg = NSImage.SymbolConfiguration(pointSize: size ?? glyph - 2, weight: weight)
-        return NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(cfg)
+        let pointSize = size ?? glyph - 2
+        let key = "\(name)|\(pointSize)|\(weight.rawValue)"
+        if let hit = Style.symbols[key] { return hit }
+        let cfg = NSImage.SymbolConfiguration(pointSize: pointSize, weight: weight)
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(cfg)
+        Style.symbols[key] = image
+        return image
     }
+    private static var symbols: [String: NSImage?] = [:]
 }
 
 /// A flat view with a solid background and optional hairlines. No layers tricks, no vibrancy.
 class FlatView: NSView {
-    var fill: NSColor? { didSet { needsDisplay = true } }
-    var borderColor: NSColor? { didSet { needsDisplay = true } }
-    var edges: NSRectEdge.Set = [] { didSet { needsDisplay = true } }
+    var fill: NSColor? { didSet { if fill != oldValue { needsDisplay = true } } }
+    var borderColor: NSColor? { didSet { if borderColor != oldValue { needsDisplay = true } } }
+    var edges: NSRectEdge.Set = [] { didSet { if edges != oldValue { needsDisplay = true } } }
 
     override var isFlipped: Bool { true }
 
@@ -81,14 +88,16 @@ extension NSRectEdge {
 /// A square glyph button: no bezel, hover fill, tinted symbol or text.
 final class GlyphButton: NSView {
     var action: (() -> Void)?
-    var image: NSImage? { didSet { needsDisplay = true } }
-    var text: String? { didSet { needsDisplay = true } }
-    var tint: NSColor = .white { didSet { needsDisplay = true } }
+    var image: NSImage? { didSet { if image !== oldValue { needsDisplay = true } } }
+    var text: String? { didSet { if text != oldValue { needsDisplay = true } } }
+    var tint: NSColor = .white { didSet { if tint != oldValue { needsDisplay = true } } }
     var hoverFill: NSColor = .darkGray
-    var isEnabled = true { didSet { needsDisplay = true } }
+    var isEnabled = true { didSet { if isEnabled != oldValue { needsDisplay = true } } }
     var font: NSFont = .systemFont(ofSize: 12)
     private var hovering = false { didSet { needsDisplay = true } }
     private var pressed = false { didSet { needsDisplay = true } }
+    /// The last tinted glyph: NSImage keeps its rendering, so redraws (hover) don't re-render the symbol.
+    private var tinted: (source: NSImage, color: NSColor, image: NSImage)?
 
     override var isFlipped: Bool { true }
 
@@ -117,7 +126,11 @@ final class GlyphButton: NSView {
         if isEnabled, hovering || pressed { (pressed ? hoverFill.blended(withFraction: 0.3, of: .white) ?? hoverFill : hoverFill).setFill(); bounds.fill() }
         let color = isEnabled ? tint : tint.withAlphaComponent(0.35)
         if let image {
-            let tinted = image.tinted(color)
+            let tinted: NSImage
+            if let t = self.tinted, t.source === image, t.color == color { tinted = t.image } else {
+                tinted = image.tinted(color)
+                self.tinted = (image, color, tinted)
+            }
             let s = tinted.size
             tinted.draw(in: NSRect(x: (bounds.width - s.width) / 2, y: (bounds.height - s.height) / 2, width: s.width, height: s.height))
         } else if let text {

@@ -11,7 +11,9 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
     private(set) var webView: AnglWebView?
     private var observers: [NSKeyValueObservation] = []
     private(set) var policy: SitePolicy?
-    private var appliedKey: String?
+    /// What the tab's user content controller holds, so navigations replace only what changed.
+    private struct Applied { var lists: String?; var scripts: [InjectedScripts.Script]?; var handlers: String? }
+    private var applied = Applied()
     /// night-audio.js is in the tab's scripts (it runs from the next load on).
     private var nightAudioInstalled = false
     var muted = false
@@ -96,7 +98,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
         webView = nil
         isLoading = false
         progress = 0
-        appliedKey = nil
+        applied = Applied()
         owner.tabChanged(self)
     }
 
@@ -108,7 +110,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func reload(fromOrigin: Bool) {
         guard let wv = webView else { load(); return }
-        appliedKey = nil
+        applied = Applied()
         if wv.url == nil, let u = node.url { navigate(u); return }
         _ = fromOrigin ? wv.reloadFromOrigin() : wv.reload()
     }
@@ -219,14 +221,16 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
         if Passwords.shared.enabled {
             c.add(Passwords.shared, contentWorld: Passwords.world, name: Passwords.handlerName)
         }
-        c.add(proxy, contentWorld: .page, name: "anglPasskey")
+        c.addScriptMessageHandler(PasskeyBridge.shared, contentWorld: .page, name: PasskeyBridge.name)
         if browser.settings.twitch.emotes {
             c.addScriptMessageHandler(TwitchEmoteBridge(), contentWorld: WKContentWorld.world(name: "angl-twitch"), name: "anglTwitchEmotes")
         }
         if isInternal { c.addScriptMessageHandler(PageBridge.shared, contentWorld: .page, name: PageBridge.name) }
     }
 
-    /// Install block lists, scripts and handlers for the page about to load. Cheap when unchanged.
+    /// Install block lists, scripts and handlers for the page about to load. Each part is replaced
+    /// only when the page needs something different, so ordinary navigations don't make WebKit
+    /// re-ship rule lists and scripts to the web process.
     private func applyPolicy(for url: URL) -> SitePolicy {
         let p = browser.policy(for: url)
         policy = p
@@ -235,12 +239,22 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
         let twitch = browser.settings.twitch
         let advancedEnabled = browser.settings.blocking.advanced && p.blocker
         let nightAudio = browser.settings.content.nightAudio
-        let key = "\(url.absoluteString)|\(p)|\(advancedEnabled)|\(scriptMuted)|\(nightAudio)|\(twitch.emotes)|\(twitch.bttv)|\(twitch.ffz)|\(twitch.seventv)|\(twitch.animated)|\(browser.web.blocker.lists.count)|\(browser.web.blocker.manifest?.generated.timeIntervalSince1970 ?? 0)|\(browser.web.scripts.generation)"
-        if key != appliedKey {
-            appliedKey = key
-            nightAudioInstalled = nightAudio
-            browser.web.blocker.apply(p, to: c)
-            browser.web.scripts.install(p, url: url, muted: scriptMuted, nightAudio: nightAudio, twitchEmotes: twitch.emotes, advancedEntries: browser.web.blocker.advancedEntries(for: url, enabled: advancedEnabled), on: c)
+        let blocker = browser.web.blocker
+        let lists = "\(p.blocker)|\(p.blockRemoteFonts)|\(blocker.lists.count)|\(blocker.manifest?.generated.timeIntervalSince1970 ?? 0)|\(blocker.fontList != nil)"
+        if lists != applied.lists {
+            applied.lists = lists
+            blocker.apply(p, to: c)
+        }
+        let scripts = browser.web.scripts.scripts(p, url: url, muted: scriptMuted, nightAudio: nightAudio, twitchEmotes: twitch.emotes,
+                                                  advancedEntries: blocker.advancedEntries(for: url, enabled: advancedEnabled))
+        if scripts != applied.scripts {
+            applied.scripts = scripts
+            browser.web.scripts.install(scripts, on: c)
+        }
+        nightAudioInstalled = nightAudio && p.javascript
+        let handlers = "\(isInternal)|\(Passwords.shared.enabled)|\(twitch.emotes)"
+        if handlers != applied.handlers {
+            applied.handlers = handlers
             installHandlers(isInternal: isInternal)
         }
         return p
@@ -249,7 +263,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// Policy inputs changed (settings, block lists): next navigation re-applies.
     func invalidatePolicy() {
         let hadNightAudio = nightAudioInstalled
-        appliedKey = nil
+        applied = Applied()
         if let u = webView?.url { _ = applyPolicy(for: u) }
         // Switching Night audio off takes effect in the open page too, without a reload.
         if hadNightAudio, !nightAudioInstalled {
@@ -270,7 +284,6 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
         applyNativeMute()
         sendVolume(to: nil)
         for frame in mediaFrames.values where !frame.info.isMainFrame { sendVolume(to: frame.info) }
-        appliedKey = nil
     }
 
     /// Updates volume.js in one frame (nil = main); iframes are reached through their media reports.
@@ -314,8 +327,6 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
                 if isPlaying != wasPlaying { owner.tabChanged(self) }
             default: owner.showHover(href, from: self)
             }
-        case "anglPasskey":
-            if message.frameInfo.isMainFrame { owner.passkeyFailed(in: self) }
         default:
             break
         }

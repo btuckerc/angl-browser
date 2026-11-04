@@ -16,11 +16,20 @@ bitwarden-api-api = { git = "https://github.com/bitwarden/sdk-internal", rev = "
 bitwarden-core = { git = "https://github.com/bitwarden/sdk-internal", rev = "c899f40c57ec5f258c37113b34bf67c8260898c4", features = ["internal"] }
 bitwarden-crypto = { git = "https://github.com/bitwarden/sdk-internal", rev = "c899f40c57ec5f258c37113b34bf67c8260898c4" }
 bitwarden-vault = { git = "https://github.com/bitwarden/sdk-internal", rev = "c899f40c57ec5f258c37113b34bf67c8260898c4" }
+# Passkeys: the SDK's WebAuthn client and authenticator, and passkey-rs at the revision it pins.
+bitwarden-fido = { git = "https://github.com/bitwarden/sdk-internal", rev = "c899f40c57ec5f258c37113b34bf67c8260898c4" }
+passkey = { git = "https://github.com/bitwarden/passkey-rs", rev = "043279e92e2eb5f509bf87eb7fa50987fd377e32" }
+async-trait = "0.1"
+url = "2"
+chrono = { version = "0.4", default-features = false, features = ["now"] }
 # Multi-lane Argon2id (the SDK's mobile builds enable this too).
 argon2 = { version = "=0.6.0-rc.8", features = ["parallel"] }
 pollster = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+
+[dev-dependencies]
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(bitwarden_ensure_non_commercial)'] }

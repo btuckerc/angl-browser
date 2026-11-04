@@ -100,6 +100,7 @@ final class WebEnvironment {
     /// policy (block lists, scripts) can change per tab without touching others.
     func configuration(container: Container, settings: Settings) -> WKWebViewConfiguration {
         let cfg = WKWebViewConfiguration()
+        if let pool = Self.processPool { cfg.setValue(pool, forKey: "processPool") }
         cfg.websiteDataStore = dataStore(for: container)
         cfg.userContentController = WKUserContentController()
         cfg.applicationNameForUserAgent = settings.privacy.safariUserAgent ? userAgentApplicationName : "angl"
@@ -112,6 +113,20 @@ final class WebEnvironment {
         cfg.setURLSchemeHandler(pages, forURLScheme: InternalPages.scheme)
         return cfg
     }
+
+    /// Every tab shares one process pool that keeps a launched web process ready, as Safari's
+    /// does, so a new tab or a cross-site navigation doesn't wait on a cold process launch (~50 ms
+    /// sooner to first paint). SPI, off by default for apps; WebKit without it keeps its default
+    /// pool. Through the runtime because WKProcessPool's API is deprecated as a no-op.
+    private static let processPool: NSObject? = {
+        guard let configClass = NSClassFromString("_WKProcessPoolConfiguration") as? NSObject.Type,
+              let poolClass = NSClassFromString("WKProcessPool") as? NSObject.Type else { return nil }
+        let config = configClass.init()
+        let make = NSSelectorFromString("_processPoolWithConfiguration:")
+        guard config.responds(to: NSSelectorFromString("setPrewarmsProcessesAutomatically:")), poolClass.responds(to: make) else { return nil }
+        config.setValue(true, forKey: "prewarmsProcessesAutomatically")
+        return poolClass.perform(make, with: config)?.takeUnretainedValue() as? NSObject
+    }()
 
     @discardableResult
     func reloadUserCSS() -> Bool { scripts.reloadUserCSS() }
@@ -300,8 +315,6 @@ final class InjectedScripts {
     private var cache: [String: String] = [:]
     private(set) var globalCSS = ""
     private(set) var hostCSS: [(pattern: String, css: String)] = []
-    /// Bumped whenever user CSS changes, so tabs know to reinstall scripts.
-    private(set) var generation = 0
 
     init(paths: Paths) { self.paths = paths }
 
@@ -328,7 +341,6 @@ final class InjectedScripts {
         let changed = global != globalCSS || hosts.map(\.0) != hostCSS.map(\.pattern) || hosts.map(\.1) != hostCSS.map(\.css)
         globalCSS = global
         hostCSS = hosts
-        if changed { generation += 1 }
         return changed
     }
 
@@ -344,12 +356,16 @@ final class InjectedScripts {
 
     static let squareCSS = "*, *::before, *::after { border-radius: 0 !important; }"
 
-    /// JS that installs (or replaces) a <style> element as early as possible.
-    static func styleScript(id: String, css: String) -> String {
+    /// JS that installs (or replaces) a <style> element as early as possible. `sameOriginOnly`
+    /// skips frames whose origin differs from the top page's (rules meant for the top site).
+    static func styleScript(id: String, css: String, sameOriginOnly: Bool = false) -> String {
         let literal = jsString(css)
+        let guardFrame = sameOriginOnly
+            ? "try { if (window.top !== window && window.location.origin !== window.top.location.origin) return; } catch (_) { return; }\n  "
+            : ""
         return """
         (() => {
-          const put = () => {
+          \(guardFrame)const put = () => {
             let s = document.getElementById("\(id)");
             if (!s) {
               s = document.createElement("style");
@@ -372,22 +388,35 @@ final class InjectedScripts {
 
     static func volumeFactor(_ db: Double) -> Double { db <= -60 ? 0 : min(1, pow(10, db / 20)) }
 
-    /// Rebuild a tab's scripts for a page's policy.
-    func install(_ policy: SitePolicy, url: URL?, muted: Bool, nightAudio: Bool, twitchEmotes: Bool, advancedEntries: [FilterListConverter.AdvancedEntry] = [], on controller: WKUserContentController) {
-        controller.removeAllUserScripts()
+    /// One user script as installed. A tab reinstalls only when its page needs a different set.
+    struct Script: Equatable {
+        let source: String
+        let time: WKUserScriptInjectionTime
+        let mainOnly: Bool
+        let world: WKContentWorld
+
+        static func == (a: Script, b: Script) -> Bool {
+            a.time == b.time && a.mainOnly == b.mainOnly && a.world === b.world && a.source == b.source
+        }
+    }
+
+    /// The scripts a page gets for its policy, in injection order.
+    func scripts(_ policy: SitePolicy, url: URL?, muted: Bool, nightAudio: Bool, twitchEmotes: Bool,
+                 advancedEntries: [FilterListConverter.AdvancedEntry] = []) -> [Script] {
+        var out: [Script] = []
         let w = InjectedScripts.world
         func add(_ src: String, _ time: WKUserScriptInjectionTime, mainOnly: Bool, world: WKContentWorld = w) {
-            controller.addUserScript(WKUserScript(source: src, injectionTime: time, forMainFrameOnly: mainOnly, in: world))
+            out.append(Script(source: src, time: time, mainOnly: mainOnly, world: world))
         }
         add(source("status.js"), .atDocumentStart, mainOnly: false)
         let volume = source("volume.js")
             .replacingOccurrences(of: "__ANGL_FACTOR__", with: String(InjectedScripts.volumeFactor(policy.volumeDB)))
             .replacingOccurrences(of: "__ANGL_MUTED__", with: muted ? "true" : "false")
         if twitchEmotes, ["twitch.tv", "www.twitch.tv", "m.twitch.tv"].contains(url?.host?.lowercased() ?? "") {
-            add(source("twitch-emotes.js"), .atDocumentStart, mainOnly: false, world: WKContentWorld.world(name: "angl-twitch"))
+            add(source("twitch-emotes.js"), .atDocumentStart, mainOnly: false, world: InjectedScripts.twitchWorld)
         }
         add(volume, .atDocumentStart, mainOnly: false)
-        if policy.square { add(InjectedScripts.styleScript(id: "angl-square", css: InjectedScripts.squareCSS), .atDocumentStart, mainOnly: false) }
+        if policy.square { add(InjectedScripts.squareScript, .atDocumentStart, mainOnly: false) }
         let css = userCSS(for: url)
         if !css.isEmpty { add(InjectedScripts.styleScript(id: "angl-user", css: css), .atDocumentStart, mainOnly: false) }
         if policy.dark != .off {
@@ -399,23 +428,32 @@ final class InjectedScripts {
             // Page world: it has to wrap the page's own MediaSource/SourceBuffer prototypes.
             if nightAudio { add(source("night-audio.js"), .atDocumentStart, mainOnly: false, world: .page) }
         }
-        installAdvanced(advancedEntries) { src, time, mainOnly, world in
-            add(src, time, mainOnly: mainOnly, world: world)
-        }
-        Passwords.shared.install(on: controller)
+        advanced(advancedEntries) { src, time, mainOnly, world in add(src, time, mainOnly: mainOnly, world: world) }
+        if Passwords.shared.enabled { add(source("passwords.js"), .atDocumentStart, mainOnly: false, world: Passwords.world) }
+        return out
     }
 
-    private func installAdvanced(
+    static let twitchWorld = WKContentWorld.world(name: "angl-twitch")
+    private static let squareScript = styleScript(id: "angl-square", css: squareCSS)
+
+    func install(_ scripts: [Script], on controller: WKUserContentController) {
+        controller.removeAllUserScripts()
+        for s in scripts {
+            controller.addUserScript(WKUserScript(source: s.source, injectionTime: s.time, forMainFrameOnly: s.mainOnly, in: s.world))
+        }
+    }
+
+    private lazy var scriptlets = ScriptletLibrary(source("adguard-scriptlets.js"))
+
+    private func advanced(
         _ entries: [FilterListConverter.AdvancedEntry],
         add: (String, WKUserScriptInjectionTime, Bool, WKContentWorld) -> Void
     ) {
-        let calls = entries.compactMap { entry -> [String: Any]? in
-            guard entry.kind == .scriptlet,
-                  let invocation = FilterListConverter.scriptletInvocation(entry.content) else { return nil }
-            return ["name": invocation.name, "args": invocation.arguments]
+        let calls = entries.compactMap { entry -> FilterListConverter.ScriptletInvocation? in
+            entry.kind == .scriptlet ? FilterListConverter.scriptletInvocation(entry.content) : nil
         }
         if !calls.isEmpty,
-           let data = try? JSONSerialization.data(withJSONObject: calls),
+           let data = try? JSONSerialization.data(withJSONObject: calls.map { ["name": $0.name, "args": $0.arguments] }),
            let json = String(data: data, encoding: .utf8) {
             let invoke = """
             (() => {
@@ -423,7 +461,7 @@ final class InjectedScripts {
               for (const rule of \(json)) window.__anglAdGuardScriptlets?.invoke(rule.name, rule.args);
             })();
             """
-            add(source("adguard-scriptlets.js") + "\n" + invoke, .atDocumentStart, false, .page)
+            add(scriptlets.source(for: calls.map(\.name)) + "\n" + invoke, .atDocumentStart, false, .page)
         }
 
         let injectedCSS = entries.filter { $0.kind == .cssInject }.map(\.content).joined(separator: "\n")
@@ -431,28 +469,16 @@ final class InjectedScripts {
             add(InjectedScripts.styleScript(id: "angl-advanced-css", css: injectedCSS), .atDocumentStart, false, InjectedScripts.world)
         }
 
-        let selectors = entries.filter { $0.kind == .extendedCSS }.map(\.content)
-        guard !selectors.isEmpty,
-              let data = try? JSONSerialization.data(withJSONObject: selectors),
-              let json = String(data: data, encoding: .utf8) else { return }
-        let css = """
-        (() => {
-          try { if (window.top !== window && window.location.origin !== window.top.location.origin) return; } catch (_) { return; }
-          const selectors = \(json);
-          let scheduled = false;
-          const apply = () => {
-            scheduled = false;
-            for (const selector of selectors) {
-              try { for (const element of document.querySelectorAll(selector)) element.style.setProperty("display", "none", "important"); } catch (_) {}
-            }
-          };
-          const schedule = () => {
-            if (!scheduled) { scheduled = true; requestAnimationFrame(apply); }
-          };
-          apply();
-          new MutationObserver(schedule).observe(document, { childList: true, subtree: true });
-        })();
-        """
-        add(css, .atDocumentStart, false, InjectedScripts.world)
-}
+        // Extended-CSS hiding as a stylesheet: the style engine applies it to elements as they
+        // appear, with no observer or per-frame queries. One rule per selector, so the CSS parser
+        // drops only the selectors it can't use (procedural ones like :contains, which never matched).
+        let hidden = entries.filter { $0.kind == .extendedCSS }
+            .map { $0.content.replacingOccurrences(of: ":-abp-has(", with: ":has(") }
+            .filter { !$0.contains("{") && !$0.contains("}") && !$0.contains("/*") }
+            .map { "\($0) { display: none !important; }" }
+        if !hidden.isEmpty {
+            add(InjectedScripts.styleScript(id: "angl-advanced-hide", css: hidden.joined(separator: "\n"), sameOriginOnly: true),
+                .atDocumentStart, false, InjectedScripts.world)
+        }
+    }
 }

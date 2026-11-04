@@ -16,6 +16,8 @@ final class Bitwarden {
     struct Failure: LocalizedError {
         let message: String
         var wrongPassword = false
+        /// The SDK's error kind (bitwarden/src/lib.rs), e.g. a WebAuthn failure class.
+        var kind = ""
         var errorDescription: String? { message }
     }
 
@@ -147,7 +149,7 @@ final class Bitwarden {
             return LoginIndex(items.map { item in
                 let login = LoginIndex.Login(id: item["id"] as? String ?? "", name: item["name"] as? String ?? "",
                                              username: item["username"] as? String ?? "", hasTOTP: item["totp"] as? Bool ?? false,
-                                             reprompt: item["reprompt"] as? Bool ?? false)
+                                             reprompt: item["reprompt"] as? Bool ?? false, hasPasskey: item["passkey"] as? Bool ?? false)
                 let uris = (item["uris"] as? [[String: Any]] ?? []).compactMap { u in
                     (u["uri"] as? String).map { LoginIndex.URI($0, rule: (u["match"] as? Int).flatMap(LoginIndex.Rule.init)) }
                 }
@@ -175,6 +177,55 @@ final class Bitwarden {
         return key
     }
 
+    // MARK: Passkeys
+
+    struct Passkey { let id: String; let name: String; let userName: String; let reprompt: Bool }
+
+    /// Items holding a passkey for `rpId`; with `ids` (base64url credential IDs), only those.
+    func passkeys(rpId: String, ids: [String]) async throws -> [Passkey] {
+        guard let sdk else { throw Failure(message: "Bitwarden is locked") }
+        let items = try await sdk.call("passkeys", ["rpId": rpId, "ids": ids])["items"] as? [[String: Any]] ?? []
+        return items.compactMap { i in
+            guard let id = i["id"] as? String else { return nil }
+            return Passkey(id: id, name: i["name"] as? String ?? "", userName: i["userName"] as? String ?? "", reprompt: i["reprompt"] as? Bool ?? false)
+        }
+    }
+
+    /// One WebAuthn ceremony in the SDK (bitwarden/src/lib.rs `fido2`). A changed item (a new
+    /// passkey, a signature counter) is saved to the server before the credential is returned:
+    /// a page must never get a passkey the vault doesn't hold. `mustSave` = registration, where
+    /// a failed save fails the request; a counter that doesn't save is only stale.
+    func fido2(_ input: [String: Any], mustSave: Bool) async throws -> [String: Any] {
+        guard let sdk, let account else { throw Failure(message: "Bitwarden is locked") }
+        let epoch = accountEpoch
+        let out = try await sdk.call("fido2", input)
+        guard let credential = out["credential"] as? [String: Any] else { throw Failure(message: "Bitwarden returned no passkey") }
+        if let save = out["save"] as? [String: Any], let request = save["request"] as? [String: Any] {
+            do {
+                try await upload(request, id: save["cipherId"] as? String, account: account, epoch: epoch)
+            } catch where !mustSave {}
+            refresh(force: true)
+        } else if mustSave {
+            throw Failure(message: "Bitwarden made no item to save the passkey in")
+        }
+        return credential
+    }
+
+    /// An SDK-encrypted item to the server: a new one (no id) or an edit, which the server
+    /// refuses if the item changed since the last sync.
+    private func upload(_ request: [String: Any], id: String?, account: Account, epoch: UInt64) async throws {
+        let body = try JSONSerialization.data(withJSONObject: request)
+        let server = try Server(account.server)
+        let token = try await accessToken(for: account, epoch: epoch)
+        let url = id.map { server.api.appending(path: "ciphers/\($0)") } ?? server.api.appending(path: "ciphers")
+        let (status, data) = try await HTTP.send(url, method: id == nil ? "POST" : "PUT", jsonData: body, bearer: token, device: device)
+        guard status == 200 else {
+            let body = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+            let message = Identity.field(body, "message") as? String
+                ?? (Identity.field(body, "ErrorModel") as? [String: Any]).flatMap { Identity.field($0, "Message") as? String }
+            throw Failure(message: message ?? (status == 0 ? "Can't reach the Bitwarden server" : "Bitwarden refused the passkey (\(status))"))
+        }
+    }
     // MARK: Sync
 
     /// Checks the account's revision date (at most every five minutes unless forced) and syncs
@@ -507,9 +558,9 @@ extension Bitwarden {
             return URLSession(configuration: c)
         }()
 
-        /// (status, body); status 0 = unreachable.
-        static func send(_ url: URL, form: [String: String]? = nil, json: [String: Any]? = nil, bearer: String? = nil,
-                         device: String) async throws -> (Int, Data) {
+        /// (status, body); status 0 = unreachable. `jsonData`: a body already serialized.
+        static func send(_ url: URL, method: String = "POST", form: [String: String]? = nil, json: [String: Any]? = nil, jsonData: Data? = nil,
+                         bearer: String? = nil, device: String) async throws -> (Int, Data) {
             var r = URLRequest(url: url)
             r.setValue("application/json", forHTTPHeaderField: "Accept")
             r.setValue(String(deviceType), forHTTPHeaderField: "Device-Type")
@@ -522,10 +573,10 @@ extension Bitwarden {
                 var allowed = CharacterSet.alphanumerics; allowed.insert(charactersIn: "-._~")
                 r.httpBody = Data(form.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: allowed) ?? "")" }
                     .joined(separator: "&").utf8)
-            } else if let json {
-                r.httpMethod = "POST"
+            } else if let body = try jsonData ?? json.map({ try JSONSerialization.data(withJSONObject: $0) }) {
+                r.httpMethod = method
                 r.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
-                r.httpBody = try JSONSerialization.data(withJSONObject: json)
+                r.httpBody = body
             }
             do {
                 let (data, response) = try await session.data(for: r)
@@ -571,8 +622,8 @@ final class BitwardenSDK: @unchecked Sendable {
                 }
                 if let error = reply["error"] as? [String: Any] {
                     let kind = error["kind"] as? String ?? ""
-                    let failure = kind == "wrongPassword" ? Bitwarden.Failure(message: "Wrong master password", wrongPassword: true)
-                        : Bitwarden.Failure(message: "Bitwarden: \(error["message"] as? String ?? kind)")
+                    let failure = kind == "wrongPassword" ? Bitwarden.Failure(message: "Wrong master password", wrongPassword: true, kind: kind)
+                        : Bitwarden.Failure(message: "Bitwarden: \(error["message"] as? String ?? kind)", kind: kind)
                     return continuation.resume(throwing: failure)
                 }
                 continuation.resume(returning: reply["ok"] as? [String: Any] ?? [:])

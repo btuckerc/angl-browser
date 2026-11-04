@@ -16,9 +16,12 @@ public struct LoginIndex: Sendable {
         public let hasTOTP: Bool
         /// Bitwarden's "master password re-prompt".
         public let reprompt: Bool
+        /// Holds a passkey (Bitwarden keeps at most one per login).
+        public let hasPasskey: Bool
 
-        public init(id: String, name: String, username: String, hasTOTP: Bool, reprompt: Bool) {
+        public init(id: String, name: String, username: String, hasTOTP: Bool, reprompt: Bool, hasPasskey: Bool = false) {
             self.id = id; self.name = name; self.username = username; self.hasTOTP = hasTOTP; self.reprompt = reprompt
+            self.hasPasskey = hasPasskey
         }
     }
 

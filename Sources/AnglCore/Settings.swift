@@ -85,7 +85,7 @@ public struct Settings: Codable, Equatable, Sendable {
     }
 
     public struct Engines: Codable, Equatable, Sendable {
-        /// Hosts that always hand off to another engine (e.g. passkey sign-ins → Safari).
+        /// Hosts that always hand off to another engine (e.g. a site that only works in Chromium).
         public var rules: [EngineRule] = []
     }
 
