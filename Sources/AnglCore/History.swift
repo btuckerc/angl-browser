@@ -141,20 +141,45 @@ public final class HistoryStore: @unchecked Sendable {
     }
 
     /// Suggests URL matches after ignoring scheme and www, then title matches.
+    /// Ranked by (URL-prefix match, visits, frecency): keeps only the best `limit` rows instead of
+    /// materializing and sorting every substring match on each keystroke.
     public func suggest(_ prefix: String, limit: Int) -> [HistoryItem] {
+        let limit = max(0, limit)
+        guard limit > 0 else { return [] }
         let needle = prefix.lowercased()
-        let items = select("SELECT url,title,last_visit,visit_count FROM visits WHERE url LIKE ? OR title LIKE ? ORDER BY (visit_count+2*typed_count) DESC",
-                           values: ["%\(prefix)%", "%\(prefix)%"])
-        return items.sorted {
-            func matches(_ item: HistoryItem) -> Bool {
-                var value = item.url.lowercased()
-                if let range = value.range(of: "://") { value = String(value[range.upperBound...]) }
-                if value.hasPrefix("www.") { value.removeFirst(4) }
-                return value.hasPrefix(needle)
+        func matches(_ url: String) -> Bool {
+            var value = url.lowercased()
+            if let range = value.range(of: "://") { value = String(value[range.upperBound...]) }
+            if value.hasPrefix("www.") { value.removeFirst(4) }
+            return value.hasPrefix(needle)
+        }
+        return queue.sync {
+            guard let db else { return [] }
+            var statement: OpaquePointer?
+            let sql = "SELECT url,title,last_visit,visit_count FROM visits WHERE url LIKE ? OR title LIKE ? ORDER BY (visit_count+2*typed_count) DESC"
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
+            defer { sqlite3_finalize(statement) }
+            bind(statement, values: ["%\(prefix)%", "%\(prefix)%"])
+            // Best rows so far, ordered: prefix matches first, then more visits, then SQL (frecency) order.
+            var best: [(match: Bool, item: HistoryItem)] = []
+            best.reserveCapacity(limit + 1)
+            func ranksBelow(_ match: Bool, _ visits: Int, _ other: (match: Bool, item: HistoryItem)) -> Bool {
+                match == other.match ? visits <= other.item.visits : !match
             }
-            let a = matches($0), b = matches($1)
-            return a == b ? ($0.visits > $1.visits) : a
-        }.prefix(max(0, limit)).map { $0 }
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let url = String(cString: sqlite3_column_text(statement, 0))
+                let visits = Int(sqlite3_column_int(statement, 3))
+                let match = matches(url)
+                if best.count == limit, let last = best.last, ranksBelow(match, visits, last) { continue }
+                let item = HistoryItem(url: url, title: String(cString: sqlite3_column_text(statement, 1)),
+                                       lastVisit: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2)), visits: visits)
+                // Later rows lose ties, so insert after every row that ranks at least as high.
+                let index = best.firstIndex { !ranksBelow(match, visits, $0) } ?? best.count
+                best.insert((match, item), at: index)
+                if best.count > limit { best.removeLast() }
+            }
+            return best.map(\.item)
+        }
     }
 
     /// Deletes one URL.

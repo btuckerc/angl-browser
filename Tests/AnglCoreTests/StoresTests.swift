@@ -64,6 +64,22 @@ final class StoresTests: XCTestCase {
         XCTAssertEqual(store.suggest("example", limit: 5).map(\.url), [page.absoluteString])
     }
 
+    func testSuggestRanksPrefixMatchesBeforeVisitsWithinLimit() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = try HistoryStore(url: url)
+        func visit(_ s: String, _ n: Int, title: String = "") { for _ in 0..<n { store.record(url: URL(string: s)!, title: title, typed: false) } }
+        visit("https://busy.test/youtube", 9)
+        visit("https://other.test/", 7, title: "YouTube mirror")
+        visit("https://www.youtube.com/", 1)
+        visit("http://youtube.com/watch", 3)
+        visit("https://you.test/", 5)
+        XCTAssertEqual(store.suggest("youtube", limit: 3).map(\.url),
+                       ["http://youtube.com/watch", "https://www.youtube.com/", "https://busy.test/youtube"])
+        XCTAssertEqual(store.suggest("YOU", limit: 2).map(\.url), ["https://you.test/", "http://youtube.com/watch"])
+        XCTAssertEqual(store.suggest("youtube", limit: 0), [])
+    }
+
     func testRecoveryTableRoundTripsAndConsumesRecords() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".sqlite")
         defer { try? FileManager.default.removeItem(at: url) }

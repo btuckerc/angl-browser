@@ -12,6 +12,7 @@ extension Notification.Name {
     static let anglSnapshots = Notification.Name("angl.snapshots")
     static let anglUserCSS = Notification.Name("angl.usercss")
     static let anglBookmarks = Notification.Name("angl.bookmarks")
+    static let anglPower = Notification.Name("angl.power")
 }
 
 /// Process-wide state for one profile: config, stores, WebKit environment, windows.

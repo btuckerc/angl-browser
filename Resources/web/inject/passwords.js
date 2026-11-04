@@ -33,7 +33,9 @@
   };
   const scope = (el) => el.form || el.closest('form, [role="form"], dialog, main') || document;
   const inputs = (root) => [...root.querySelectorAll('input')].filter(visible);
-  const passwordIn = (root) => inputs(root).find(isPassword);
+  // First visible input matching `test`; cheap field checks run before visible()'s layout/style reads.
+  const firstVisible = (root, test) => [...root.querySelectorAll('input')].find((el) => test(el) && visible(el));
+  const passwordIn = (root) => firstVisible(root, isPassword);
   // The username field that belongs with `pass`: the last plausible text input before it.
   const userFor = (pass) => {
     const all = inputs(scope(pass));
@@ -68,7 +70,7 @@
   const scan = () => {
     if (document.visibilityState !== 'visible') return;
     const pass = passwordIn(document);
-    const user = pass ? userFor(pass) : inputs(document).find((el) => isUser(el) && /username|email|webauthn/.test(el.autocomplete || ''));
+    const user = pass ? userFor(pass) : firstVisible(document, (el) => isUser(el) && /username|email|webauthn/.test(el.autocomplete || ''));
     const el = user && (!pass || visible(user)) ? user : pass;
     if (el && !el.value && !announced.has(el)) report(el, 'auto');
   };
@@ -111,7 +113,7 @@
       const active = document.activeElement;
       if (active && loginField(active)) { report(active, 'explicit'); return true; }
       const pass = passwordIn(document);
-      const el = (pass && userFor(pass)) || pass || inputs(document).find(isUser);
+      const el = (pass && userFor(pass)) || pass || firstVisible(document, isUser);
       if (!el) return false;
       report(el, 'explicit');
       return true;

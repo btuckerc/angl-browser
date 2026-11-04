@@ -109,6 +109,7 @@ final class PaletteView: FlatView, NSTextFieldDelegate {
         items = tabChooser ? chooserItems(field.stringValue) : Suggestions.compute(field.stringValue, window: owner)
         selected = 0
         list.style = owner.style; list.items = items; list.selected = selected
+        if !tabChooser { owner.preconnect(items.first?.preconnect, newTab: newTab) }
         onResize()
         needsLayout = true
     }
@@ -129,6 +130,7 @@ final class PaletteView: FlatView, NSTextFieldDelegate {
             guard !items.isEmpty else { return true }
             selected = (selected + (selector == #selector(NSResponder.moveDown(_:)) ? 1 : -1) + items.count) % items.count
             list.selected = selected
+            if !tabChooser { owner.preconnect(items[selected].preconnect, newTab: newTab) }
             return true
         case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)):
             if items.indices.contains(selected) {

@@ -210,8 +210,10 @@ final class NavBar: FlatView, NSTextFieldDelegate {
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         switch selector {
-        case #selector(NSResponder.moveDown(_:)): suggestions.move(1); return true
-        case #selector(NSResponder.moveUp(_:)): suggestions.move(-1); return true
+        case #selector(NSResponder.moveDown(_:)), #selector(NSResponder.moveUp(_:)):
+            suggestions.move(selector == #selector(NSResponder.moveDown(_:)) ? 1 : -1)
+            owner.preconnect(suggestions.selected?.preconnect, newTab: false)
+            return true
         case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)):
             let flags = NSApp.currentEvent?.modifierFlags ?? []
             let d: Disposition = flags.contains(.shift) ? .newWindow : flags.contains(.command) ? .childTab : .current
@@ -247,6 +249,7 @@ final class NavBar: FlatView, NSTextFieldDelegate {
         let items = Suggestions.compute(field.stringValue, window: owner)
         if items.isEmpty { suggestions.hide(); return }
         suggestions.show(items, below: boxRectOnScreen, parent: window)
+        owner.preconnect(suggestions.selected?.preconnect, newTab: false)
     }
 }
 
@@ -273,6 +276,9 @@ struct Suggestion {
     var hintColor: NSColor?
     /// Right-click menu for the row (bookmarks).
     var menu: (@MainActor () -> NSMenu)? = nil
+    /// Where the row navigates, when that is worth warming a connection to before it's picked:
+    /// searches, visited pages and bookmarks, not arbitrary text that merely looks like a host.
+    var preconnect: URL? = nil
     var act: @MainActor (NavBar.Disposition) -> Void
 
     var glyph: String {
@@ -313,7 +319,8 @@ enum Suggestions {
             let typed = text.trimmingCharacters(in: .whitespaces)
             let isAddress = Omnibox.urlIfAddress(typed) != nil
             var out = [Suggestion(kind: isAddress ? .go : .search, title: typed,
-                                  detail: isAddress ? "" : "search · \(url.host() ?? "")", hint: "↩") { d in w.go(url, disposition: d) }]
+                                  detail: isAddress ? "" : "search · \(url.host() ?? "")", hint: "↩",
+                                  preconnect: isAddress ? nil : url) { d in w.go(url, disposition: d) }]
             var seen: Set<String> = [url.absoluteString]
             for s in tabs(typed, w).prefix(3) { out.append(s) }
             for bm in b.bookmarks.search(typed, limit: 3) where seen.insert(bm.url ?? "").inserted {
@@ -323,6 +330,9 @@ enum Suggestions {
                 out.append(history(h, w))
                 if out.count >= limit { break }
             }
+            // A typed address is warmed once history or bookmarks show its host is real.
+            let site = { (u: URL?) in u?.host().map { $0.hasPrefix("www.") ? String($0.dropFirst(4)) : $0 } }
+            if isAddress, let host = site(url), out.contains(where: { site($0.preconnect) == host }) { out[0].preconnect = url }
             return Array(out.prefix(limit))
         }
     }
@@ -345,7 +355,7 @@ enum Suggestions {
 
     private static func history(_ h: HistoryItem, _ w: BrowserWindowController) -> Suggestion {
         Suggestion(kind: .history, title: h.title.isEmpty ? h.url : h.title,
-                   detail: URL(string: h.url).map(Omnibox.display) ?? h.url, hint: "") { d in
+                   detail: URL(string: h.url).map(Omnibox.display) ?? h.url, hint: "", preconnect: URL(string: h.url)) { d in
             if let u = URL(string: h.url) { w.go(u, disposition: d) }
         }
     }
@@ -360,7 +370,8 @@ enum Suggestions {
 
     private static func bookmark(_ bm: Bookmark, _ w: BrowserWindowController) -> Suggestion? {
         guard let s = bm.url, let u = URL(string: s) else { return nil }
-        return Suggestion(kind: .bookmark, title: bm.title, detail: Omnibox.display(u), hint: "", menu: { BookmarkMenu.make(bm, w) }) { d in w.go(u, disposition: d) }
+        return Suggestion(kind: .bookmark, title: bm.title, detail: Omnibox.display(u), hint: "", menu: { BookmarkMenu.make(bm, w) },
+                          preconnect: u) { d in w.go(u, disposition: d) }
     }
 }
 

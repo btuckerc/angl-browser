@@ -163,6 +163,11 @@ ticket. Tags are `vVERSION` and match `VERSION`.
 - **History** (⌘Y) lists visits newest first, grouped by day, with Archive and Closed tabs
   beside it. ↓ from the search box walks the rows, ⌫ forgets the focused one, ⎋ returns
   to search. The palette's `h ` filter ranks the same history by frecency instead.
+- **Speed**: on AC power pages render at the display's refresh rate (120 Hz on ProMotion)
+  instead of WebKit's 60 Hz default; on battery WebKit's default stays (an open tab follows a
+  power change the next time it is shown). While you type in the address box, angl opens the
+  connection to where Return would go (the search engine, or a page from history or
+  bookmarks), so the page starts sooner.
 - `>Make angl the Default Browser` registers angl for http/https.
 
 ## Files

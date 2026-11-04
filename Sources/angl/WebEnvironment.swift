@@ -1,5 +1,6 @@
 import AnglCore
 import AppKit
+import IOKit.ps
 import Network
 import WebKit
 
@@ -27,6 +28,7 @@ final class WebEnvironment {
     func start(settings: Settings) {
         blocker.load(settings: settings)
         _ = scripts.reloadUserCSS()
+        watchPowerSource()
     }
 
     // MARK: Containers
@@ -110,6 +112,7 @@ final class WebEnvironment {
         cfg.preferences.inactiveSchedulingPolicy = .suspend
         cfg.preferences.isFraudulentWebsiteWarningEnabled = true
         cfg.preferences.javaScriptCanOpenWindowsAutomatically = false
+        applyRenderingRate(to: cfg.preferences)
         cfg.setURLSchemeHandler(pages, forURLScheme: InternalPages.scheme)
         return cfg
     }
@@ -127,6 +130,54 @@ final class WebEnvironment {
         config.setValue(true, forKey: "prewarmsProcessesAutomatically")
         return poolClass.perform(make, with: config)?.takeUnretainedValue() as? NSObject
     }()
+
+    // MARK: Rendering rate
+
+    /// On AC power pages render at the display's refresh rate (120 Hz on ProMotion) rather than
+    /// WebKit's default of about 60 Hz: animation frames, hover effects and content revealed while
+    /// scrolling update twice as often. On battery WebKit's default stays, and Low Power Mode and
+    /// thermal throttling apply either way. SPI feature flag (Safari's Feature Flags "Prefer Page
+    /// Rendering Updates near 60fps"); WebKit's default if absent.
+    private(set) var rendersAtDisplayRate = WebEnvironment.onExternalPower()
+    private var powerSource: CFRunLoopSource?
+
+    private static let near60FPSFeature: NSObject? = {
+        let list = NSSelectorFromString("_features")
+        guard WKPreferences.responds(to: list),
+              let features = WKPreferences.perform(list)?.takeUnretainedValue() as? [NSObject] else { return nil }
+        return features.first { $0.value(forKey: "key") as? String == "PreferPageRenderingUpdatesNear60FPSEnabled" }
+    }()
+
+    /// Also for open pages: WebKit picks the change up the next time the page is shown or swaps process.
+    func applyRenderingRate(to preferences: WKPreferences) {
+        let set = NSSelectorFromString("_setEnabled:forFeature:")
+        guard let feature = Self.near60FPSFeature, preferences.responds(to: set) else { return }
+        typealias SetEnabled = @convention(c) (AnyObject, Selector, Bool, AnyObject) -> Void
+        unsafeBitCast(preferences.method(for: set), to: SetEnabled.self)(preferences, set, !rendersAtDisplayRate, feature)
+    }
+
+    /// Posts `.anglPower` when switching between AC and battery changes the rendering rate.
+    private func watchPowerSource() {
+        guard powerSource == nil, let source = IOPSNotificationCreateRunLoopSource({ context in
+            guard let context else { return }
+            MainActor.assumeIsolated { Unmanaged<WebEnvironment>.fromOpaque(context).takeUnretainedValue().powerSourceChanged() }
+        }, Unmanaged.passUnretained(self).toOpaque())?.takeRetainedValue() else { return }
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
+        powerSource = source
+    }
+
+    private func powerSourceChanged() {
+        let external = Self.onExternalPower()
+        guard external != rendersAtDisplayRate else { return }
+        rendersAtDisplayRate = external
+        NotificationCenter.default.post(name: .anglPower, object: nil)
+    }
+
+    nonisolated private static func onExternalPower() -> Bool {
+        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let type = IOPSGetProvidingPowerSourceType(info)?.takeUnretainedValue() else { return true }
+        return type as String == kIOPMACPowerKey
+    }
 
     @discardableResult
     func reloadUserCSS() -> Bool { scripts.reloadUserCSS() }

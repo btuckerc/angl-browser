@@ -151,6 +151,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
             w.blank.bookmarksChanged()
             w.navBar.bookmarksChanged()
         }
+        on(.anglPower) { w in
+            for (_, t) in w.tabs { if let p = t.webView?.configuration.preferences { w.browser.web.applyRenderingRate(to: p) } }
+        }
     }
 
     // MARK: Tabs
@@ -737,6 +740,35 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         let current = workspaceID(of: t.node) ?? workspaceID
         guard browser.settings.tabs.routeByURL, t.node.containerID == nil else { return nil } // explicit container choice wins
         return browser.workspaces.workspace(claiming: url, current: current)
+    }
+
+    private var preconnected: (origin: URL, at: Date)?
+
+    /// Opens the connection (DNS, TCP, TLS) to the origin the URL field would load, so Enter skips
+    /// those round trips (~100–250 ms sooner to first paint on a cold origin). Only the origin is
+    /// contacted, through a loaded tab on the destination's container (its proxy and cookies); URLs
+    /// that another app or Space would take are left alone. SPI; skipped if absent.
+    func preconnect(_ url: URL?, newTab: Bool) {
+        guard let url, url.scheme == "http" || url.scheme == "https", url.host()?.isEmpty == false,
+              var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
+        parts.user = nil; parts.password = nil; parts.path = "/"; parts.query = nil; parts.fragment = nil
+        guard let origin = parts.url else { return }
+        if let p = preconnected, p.origin == origin, Date().timeIntervalSince(p.at) < 10 { return }
+        if Engine.rule(for: url, in: browser.settings.engines.rules) != nil { return }
+        let target: Container
+        if !newTab, let a = active {
+            if workspaceClaiming(url, from: a) != nil { return }
+            target = a.container
+        } else {
+            if browser.settings.tabs.routeByURL, browser.workspaces.workspace(claiming: url, current: workspaceID) != nil { return }
+            target = browser.workspaces.container(workspace.containerID) ?? browser.workspaces.containers[0]
+        }
+        let preconnect = NSSelectorFromString("_preconnectToServer:")
+        let candidates = (active.map { [$0] } ?? []) + tabs.values
+        guard let wv = candidates.first(where: { $0.webView != nil && $0.container.id == target.id })?.webView,
+              wv.responds(to: preconnect) else { return }
+        wv.perform(preconnect, with: origin)
+        preconnected = (origin, Date())
     }
 
     /// A URL rule claimed a navigation: reopen it in that workspace (fresh, GET only).
