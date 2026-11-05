@@ -45,6 +45,12 @@ public struct Settings: Codable, Equatable, Sendable {
         public var blockAutoplay = true
         /// YouTube thumbnails show one of YouTube's auto-generated video stills instead of the uploader's image.
         public var youtubeFrames = true
+        /// How a page's full screen (a video's full-screen button) is shown.
+        public var fullscreen: FullscreenMode = .screen
+        /// Switching away from a tab whose video plays moves the video to Picture in Picture.
+        public var autoPictureInPicture = false
+        /// YouTube's quality when a video starts; `.auto` leaves the choice to YouTube.
+        public var youtubeQuality: YouTubeQuality = .auto
         /// WebKit hardening: `.noJIT` runs JavaScript interpreter-only (macOS 26.4+
         /// `securityRestrictionMode = .maximizeCompatibility`); `.lockdown` is Lockdown Mode.
         public var hardening: Hardening = .off
@@ -153,6 +159,22 @@ public enum DarkMode: String, Codable, Sendable, CaseIterable {
     /// Darken every page.
     case force
     case off
+}
+
+public enum FullscreenMode: String, Codable, Sendable, CaseIterable {
+    /// The tab fills the screen at once, in the current Space.
+    case screen
+    /// The tab fills angl's window.
+    case window
+    /// WebKit's macOS full screen: a Space of its own, entered with the system animation.
+    case native
+}
+
+/// YouTube player quality names; each caps at what the video has.
+public enum YouTubeQuality: String, Codable, Sendable, CaseIterable {
+    case auto, hd720, hd1080, hd1440, hd2160
+    /// The best the video has (up to 4320p).
+    case highres
 }
 
 public enum Hardening: String, Codable, Sendable, CaseIterable {

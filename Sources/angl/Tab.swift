@@ -87,6 +87,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
     func unload() {
         Passwords.shared.pageHidden(in: self)
         PasskeyBridge.shared.documentGone(in: self)
+        owner.endPageFullscreen(of: self, tellPage: false)
         guard let wv = webView else { return }
         captureState()
         observers.removeAll()
@@ -229,6 +230,9 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
             c.addScriptMessageHandler(TwitchEmoteBridge(), contentWorld: WKContentWorld.world(name: "angl-twitch"), name: "anglTwitchEmotes")
         }
         if isInternal { c.addScriptMessageHandler(PageBridge.shared, contentWorld: .page, name: PageBridge.name) }
+        if browser.settings.content.fullscreen != .native {
+            c.addScriptMessageHandler(FullscreenBridge(self), contentWorld: InjectedScripts.world, name: FullscreenBridge.name)
+        }
     }
 
     /// Install block lists, scripts and handlers for the page about to load. Each part is replaced
@@ -241,16 +245,16 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
         let isInternal = url.scheme == InternalPages.scheme
         let twitch = browser.settings.twitch
         let advancedEnabled = browser.settings.blocking.advanced && p.blocker
-        let nightAudio = browser.settings.content.nightAudio
-        let youtubeFrames = browser.settings.content.youtubeFrames
+        let content = browser.settings.content
+        let nightAudio = content.nightAudio
+        let youtubeFrames = content.youtubeFrames
         let blocker = browser.web.blocker
         let lists = "\(p.blocker)|\(p.blockRemoteFonts)|\(blocker.lists.count)|\(blocker.manifest?.generated.timeIntervalSince1970 ?? 0)|\(blocker.fontList != nil)|\(youtubeFrames && blocker.youtubeList != nil)"
         if lists != applied.lists {
             applied.lists = lists
             blocker.apply(p, youtubeFrames: youtubeFrames, to: c)
         }
-        let scripts = browser.web.scripts.scripts(p, url: url, muted: scriptMuted, nightAudio: nightAudio, twitchEmotes: twitch.emotes,
-                                                  youtubeFrames: youtubeFrames,
+        let scripts = browser.web.scripts.scripts(p, url: url, muted: scriptMuted, content: content, twitchEmotes: twitch.emotes,
                                                   advancedEntries: blocker.advancedEntries(for: url, enabled: advancedEnabled))
         if scripts != applied.scripts {
             applied.scripts = scripts
@@ -258,9 +262,11 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
         }
         nightAudioInstalled = nightAudio && p.javascript
         youtubeFramesInstalled = youtubeFrames && InjectedScripts.isYouTube(url)
-        let handlers = "\(isInternal)|\(Passwords.shared.enabled)|\(twitch.emotes)"
+        let handlers = "\(isInternal)|\(Passwords.shared.enabled)|\(twitch.emotes)|\(content.fullscreen != .native)"
         if handlers != applied.handlers {
             applied.handlers = handlers
+            // Without the bridge the open page could no longer say it left: end it first.
+            if content.fullscreen == .native { owner.endPageFullscreen(of: self, tellPage: true) }
             installHandlers(isInternal: isInternal)
         }
         return p
@@ -291,6 +297,50 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
         muted.toggle()
         applyVolume()
         owner.tabChanged(self)
+    }
+
+    // MARK: Picture in Picture
+
+    enum PictureInPicture: String { case toggle, enter, exit, on, off, noVideo = "none" }
+
+    /// Set when switching away moved this tab's video to Picture in Picture; coming back ends it.
+    var autoPictureInPicture = false
+
+    /// angl's world, so the page's own overrides don't get in the way. `enter` takes only a playing video.
+    private static let pictureInPictureScript = """
+    if (document.pictureInPictureElement) {
+      if (mode === 'enter') return 'on';
+      await document.exitPictureInPicture();
+      return 'off';
+    }
+    if (mode === 'exit') return 'none';
+    const area = (v) => { const r = v.getBoundingClientRect(); return r.width * r.height; };
+    const all = [...document.querySelectorAll('video')].filter((v) => v.readyState > 0 && !v.disablePictureInPicture);
+    const v = all.find((v) => !v.paused && !v.muted) ?? all.find((v) => !v.paused) ?? all.sort((a, b) => area(b) - area(a))[0];
+    if (!v || (mode === 'enter' && v.paused)) return 'none';
+    await v.requestPictureInPicture();
+    return 'on';
+    """
+
+    /// The main frame first, then iframes that reported media (an embedded player).
+    @discardableResult
+    func pictureInPicture(_ mode: PictureInPicture) async -> PictureInPicture {
+        guard let wv = webView else { return .noVideo }
+        let frames: [WKFrameInfo?] = [nil] + mediaFrames.values.map(\.info).filter { !$0.isMainFrame }
+        for frame in frames {
+            let result = try? await wv.callAsyncJavaScript(Tab.pictureInPictureScript, arguments: ["mode": mode.rawValue],
+                                                            in: frame, contentWorld: InjectedScripts.world)
+            if let r = (result as? String).flatMap(PictureInPicture.init(rawValue:)), r != .noVideo { return r }
+        }
+        return .noVideo
+    }
+
+    func togglePictureInPicture() {
+        autoPictureInPicture = false
+        let owner = owner, muted = browser.style.muted
+        Task {
+            if await pictureInPicture(.toggle) == .noVideo { owner.toast("no video on this page", color: muted) }
+        }
     }
 
     func applyVolume() {
@@ -440,6 +490,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
         // The old document's frames are gone; the new one's report again once their media plays.
         let wasPlaying = isPlaying
         mediaFrames = [:]
+        owner.endPageFullscreen(of: self, tellPage: false)
         if isPlaying != wasPlaying { owner.tabChanged(self) }
         if let p = policy { webView.pageZoom = p.zoom }
         // New host: show its stored icon (or none) until the page's own icon loads.
@@ -521,6 +572,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         mediaFrames = [:]
         playingAudio = false
+        owner.endPageFullscreen(of: self, tellPage: false)
         owner.tabChanged(self)
         guard owner.active === self else { unload(); return }
         // Reload once; a page that dies again right away stays down until the user reloads it,

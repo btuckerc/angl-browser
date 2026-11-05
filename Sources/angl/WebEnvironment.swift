@@ -113,6 +113,9 @@ final class WebEnvironment {
         cfg.preferences.isFraudulentWebsiteWarningEnabled = true
         cfg.preferences.javaScriptCanOpenWindowsAutomatically = false
         applyRenderingRate(to: cfg.preferences)
+        // Picture in Picture, off by default for apps (Safari turns it on): the PiP command and
+        // auto PiP call the page's requestPictureInPicture, which WebKit refuses without it.
+        Self.setFeature(Self.pictureInPictureFeature, true, on: cfg.preferences)
         cfg.setURLSchemeHandler(pages, forURLScheme: InternalPages.scheme)
         return cfg
     }
@@ -141,19 +144,26 @@ final class WebEnvironment {
     private(set) var rendersAtDisplayRate = WebEnvironment.onExternalPower()
     private var powerSource: CFRunLoopSource?
 
-    private static let near60FPSFeature: NSObject? = {
+    private static let features: [NSObject] = {
         let list = NSSelectorFromString("_features")
-        guard WKPreferences.responds(to: list),
-              let features = WKPreferences.perform(list)?.takeUnretainedValue() as? [NSObject] else { return nil }
-        return features.first { $0.value(forKey: "key") as? String == "PreferPageRenderingUpdatesNear60FPSEnabled" }
+        guard WKPreferences.responds(to: list) else { return [] }
+        return WKPreferences.perform(list)?.takeUnretainedValue() as? [NSObject] ?? []
     }()
+    private static func feature(_ key: String) -> NSObject? { features.first { $0.value(forKey: "key") as? String == key } }
+    private static let near60FPSFeature = feature("PreferPageRenderingUpdatesNear60FPSEnabled")
+    private static let pictureInPictureFeature = feature("AllowsPictureInPictureMediaPlayback")
+
+    /// SPI feature flag switch; a missing flag (another WebKit) leaves WebKit's default.
+    private static func setFeature(_ feature: NSObject?, _ on: Bool, on preferences: WKPreferences) {
+        let set = NSSelectorFromString("_setEnabled:forFeature:")
+        guard let feature, preferences.responds(to: set) else { return }
+        typealias SetEnabled = @convention(c) (AnyObject, Selector, Bool, AnyObject) -> Void
+        unsafeBitCast(preferences.method(for: set), to: SetEnabled.self)(preferences, set, on, feature)
+    }
 
     /// Also for open pages: WebKit picks the change up the next time the page is shown or swaps process.
     func applyRenderingRate(to preferences: WKPreferences) {
-        let set = NSSelectorFromString("_setEnabled:forFeature:")
-        guard let feature = Self.near60FPSFeature, preferences.responds(to: set) else { return }
-        typealias SetEnabled = @convention(c) (AnyObject, Selector, Bool, AnyObject) -> Void
-        unsafeBitCast(preferences.method(for: set), to: SetEnabled.self)(preferences, set, !rendersAtDisplayRate, feature)
+        Self.setFeature(Self.near60FPSFeature, !rendersAtDisplayRate, on: preferences)
     }
 
     /// Posts `.anglPower` when switching between AC and battery changes the rendering rate.
@@ -462,7 +472,7 @@ final class InjectedScripts {
     }
 
     /// The scripts a page gets for its policy, in injection order.
-    func scripts(_ policy: SitePolicy, url: URL?, muted: Bool, nightAudio: Bool, twitchEmotes: Bool, youtubeFrames: Bool,
+    func scripts(_ policy: SitePolicy, url: URL?, muted: Bool, content: Settings.Content, twitchEmotes: Bool,
                  advancedEntries: [FilterListConverter.AdvancedEntry] = []) -> [Script] {
         var out: [Script] = []
         let w = InjectedScripts.world
@@ -476,7 +486,8 @@ final class InjectedScripts {
         if twitchEmotes, ["twitch.tv", "www.twitch.tv", "m.twitch.tv"].contains(url?.host?.lowercased() ?? "") {
             add(source("twitch-emotes.js"), .atDocumentStart, mainOnly: false, world: InjectedScripts.twitchWorld)
         }
-        if youtubeFrames, InjectedScripts.isYouTube(url) {
+        let youtube = InjectedScripts.isYouTube(url)
+        if content.youtubeFrames, youtube {
             add(source("youtube-frames.js"), .atDocumentStart, mainOnly: true)
         }
         add(volume, .atDocumentStart, mainOnly: false)
@@ -490,7 +501,17 @@ final class InjectedScripts {
         if policy.javascript {
             add(source("passkey.js"), .atDocumentStart, mainOnly: true, world: .page)
             // Page world: it has to wrap the page's own MediaSource/SourceBuffer prototypes.
-            if nightAudio { add(source("night-audio.js"), .atDocumentStart, mainOnly: false, world: .page) }
+            if content.nightAudio { add(source("night-audio.js"), .atDocumentStart, mainOnly: false, world: .page) }
+            // Instant full screen replaces the page's Fullscreen API (page world); the gate in
+            // angl's world holds the app handler. Iframes keep WebKit's full screen.
+            if content.fullscreen != .native {
+                add(source("fullscreen.js"), .atDocumentStart, mainOnly: true, world: .page)
+                add(source("fullscreen-gate.js"), .atDocumentStart, mainOnly: true)
+            }
+            if youtube, content.youtubeQuality != .auto {
+                add(source("youtube-quality.js").replacingOccurrences(of: "__ANGL_YT_QUALITY__", with: content.youtubeQuality.rawValue),
+                    .atDocumentStart, mainOnly: true, world: .page)
+            }
         }
         advanced(advancedEntries) { src, time, mainOnly, world in add(src, time, mainOnly: mainOnly, world: world) }
         if Passwords.shared.enabled { add(source("passwords.js"), .atDocumentStart, mainOnly: false, world: Passwords.world) }

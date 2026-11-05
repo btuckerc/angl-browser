@@ -112,6 +112,22 @@ ticket. Tags are `vVERSION` and match `VERSION`.
   site appends with WebCodecs, plays it compressed in sync with the video and turns the video's
   own audio track off. No permissions; everything stays in the page. Switching it on applies from
   the next page load; switching it off takes effect at once.
+- **Video full screen** (Settings › Pages & media › Media): a page's full-screen button (YouTube,
+  Twitch, any HTML5 player) fills the screen at once, in the current Space, with no macOS
+  full-screen animation: the window goes borderless over the whole screen (below the notch), the
+  menu bar and Dock auto-hide, and Esc or the page's own button puts everything back. *Fill the
+  window* only hides angl's chrome; *macOS full screen* keeps WebKit's own (a new Space).
+  angl enters once per click or key press in the page, and says so with a toast. The page's
+  element is put in the top layer with the browser's full-screen styling, but CSS written for
+  `:fullscreen` doesn't match it; players styled only that way look wrong — pick *macOS full
+  screen* for them. Players in iframes (embeds) and elements in shadow trees keep WebKit's full
+  screen. Applies from the next page load.
+- **Picture in Picture** (⌥⌘P): the page's playing video (or its largest) floats in macOS
+  Picture in Picture; again to bring it back. *Picture in Picture on tab switch* (off) does it
+  for you when you leave a tab with a playing video, and ends it when you come back.
+- **YouTube quality** (Settings › Pages & media › Media, Auto): each video starts at the best
+  quality it has up to the chosen one (720p…4K, Highest), as if picked in the player's menu;
+  picking another there still works. Applies from the next page load.
 - **Hardening** (Settings › Privacy & blocking › Security › WebKit restrictions, or per site): `noJIT` runs JavaScript without the JIT
   (macOS 26.4+), `lockdown` is WebKit Lockdown Mode. JavaScript itself stays on by default;
   switch it off globally or per site.

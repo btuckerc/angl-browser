@@ -173,6 +173,7 @@ enum Commands {
             Command("tab.child", "First Child Tab", .tabs, "cmd+opt+down") { $0?.selectFirstChild() },
             Command("tab.pin", "Pin / Unpin Tab", .tabs, "cmd+shift+p") { w in w?.active.map { w?.togglePin($0) } },
             Command("tab.mute", "Mute / Unmute Tab", .tabs, "cmd+shift+m") { w in w?.active?.toggleMute() },
+            Command("tab.pip", "Picture in Picture", .tabs, "cmd+opt+p") { w in w?.active?.togglePictureInPicture() },
             Command("tab.duplicate", "Duplicate Tab", .tabs) { w in w?.active.map { w?.duplicate($0) } },
             Command("split.toggle", "Split View / Exit Split", .tabs, "cmd+opt+\\") { $0?.toggleSplitChooser() },
             Command("split.left", "Focus Left Pane", .tabs, "cmd+opt+left") { $0?.focusSplitPane(left: true) },

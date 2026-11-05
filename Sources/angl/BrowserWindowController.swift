@@ -30,6 +30,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     private(set) var focusMode = false
     private var peeking = false
     private var navForcedVisible = false
+    /// The page shown in angl's instant full screen (content.fullscreen), and what to put back.
+    var pageFullscreen: PageFullscreenState?
 
     let root = RootView()
     private(set) var navBar: NavBar!
@@ -265,6 +267,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
             if otherTab.url != nil { otherTab.load() }
         }
         attachActive()
+        if previous !== t { switchPictureInPicture(from: previous, to: t) }
         if previous !== t, navBar.editing, !navBar.typed, let wv = t.webView { window?.makeFirstResponder(wv) }
         sidebar.reload()
         sitePanel?.close()
@@ -343,6 +346,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
 
 
     private func attachActive() {
+        // The page in instant full screen is leaving the window (tab or Space switch).
+        if let fs = pageFullscreen?.tab, fs !== active { endPageFullscreen(of: fs, tellPage: true) }
         let split = browser.settings.tabs.splitView ? splits[workspaceID] : nil
         let members = split.map { [$0.first, $0.second] } ?? active.map { [$0.node.id] } ?? []
         for (id, t) in tabs {
@@ -819,12 +824,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     // MARK: Commands
 
     func focusURLField() {
+        endPageFullscreen(of: nil, tellPage: true)
         if paletteMode { openAddressPalette(prefill: active?.url?.absoluteString, newTab: active == nil); return }
         if focusMode { navForcedVisible = true; root.needsLayout = true; root.layoutSubtreeIfNeeded() }
         navBar.focusField(prefill: nil)
     }
 
     func openPalette() {
+        endPageFullscreen(of: nil, tellPage: true)
         if paletteMode { openAddressPalette(prefill: ">", newTab: false) }
         else {
             if focusMode { navForcedVisible = true; root.needsLayout = true; root.layoutSubtreeIfNeeded() }
@@ -833,6 +840,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func openAddressPalette(prefill: String?, newTab: Bool) {
+        endPageFullscreen(of: nil, tellPage: true)
         // An empty tab has its own field: the keyboard goes there rather than to a panel over it.
         if dockedField, active?.webView == nil { blank.focusField(prefill: prefill); return }
         palette.show(prefill: prefill, newTab: newTab)
@@ -1042,10 +1050,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     // MARK: Layout
 
     private func layoutContentPanes() {
-        guard browser.settings.tabs.splitView, let s = splits[workspaceID],
+        guard pageFullscreen == nil, browser.settings.tabs.splitView, let s = splits[workspaceID],
               let first = tree.node(s.first).flatMap({ tabs[$0.id]?.webView }),
               let second = tree.node(s.second).flatMap({ tabs[$0.id]?.webView }) else {
             active?.webView?.frame = content.bounds
+            active?.webView?.isHidden = false
+            if pageFullscreen != nil { for wv in content.subviews where wv is AnglWebView && wv !== active?.webView { wv.isHidden = true } }
             splitDivider.isHidden = true
             paneMarker.isHidden = true
             return
@@ -1073,8 +1083,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
 
     func layoutPanes(in bounds: NSRect, animated: Bool) {
         let fullScreen = window?.styleMask.contains(.fullScreen) ?? false
-        let navH: CGFloat = paletteMode ? 0 : ((focusMode && !navForcedVisible) ? 0 : style.navBar)
-        let showSidebar = !focusMode && (!sidebarHidden || peeking)
+        // Instant page full screen: the page alone, below the notch when angl took the screen.
+        let immersive = pageFullscreen != nil
+        let topInset = pageFullscreen?.topInset ?? 0
+        let navH: CGFloat = paletteMode || immersive ? 0 : ((focusMode && !navForcedVisible) ? 0 : style.navBar)
+        let showSidebar = !focusMode && !immersive && (!sidebarHidden || peeking)
         let overlay = sidebarHidden && peeking
         func set(_ v: NSView, _ r: NSRect) { animated ? (v.animator().frame = r) : (v.frame = r) }
 
@@ -1086,19 +1099,19 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         let sideX: CGFloat = showSidebar ? 0 : -sideW
         let sidebarY: CGFloat = paletteMode ? 0 : navH
         set(sidebar, NSRect(x: sideX, y: sidebarY, width: sideW, height: bounds.height - sidebarY))
-        sidebar.isHidden = focusMode
+        sidebar.isHidden = focusMode || immersive
         sidebar.paletteHeaderVisible = paletteMode
         resizeHandle.isHidden = !showSidebar || overlay
         resizeHandle.frame = NSRect(x: sideW - 3, y: sidebarY, width: 6, height: bounds.height - sidebarY)
         let catchW = CGFloat(browser.theme.sidebar.peekWidth)
-        edge.isHidden = !(sidebarHidden && !focusMode) || catchW <= 0
+        edge.isHidden = !(sidebarHidden && !focusMode && !immersive) || catchW <= 0
         edge.frame = NSRect(x: 0, y: sidebarY, width: catchW, height: bounds.height - sidebarY)
         root.addSubview(sidebar, positioned: .above, relativeTo: content)
 
         let placement = browser.theme.window.outline
-        let inset: CGFloat = placement == .content && !fullScreen && !focusMode ? 6 : 0
+        let inset: CGFloat = placement == .content && !fullScreen && !focusMode && !immersive ? 6 : 0
         let contentX: CGFloat = (showSidebar && !overlay ? sideW : 0) + inset
-        var y = navH + inset
+        var y = navH + inset + topInset
         for bar in [permissionBar, findBar!] as [NSView] where !bar.isHidden {
             bar.frame = NSRect(x: contentX, y: y, width: max(0, bounds.width - contentX - inset), height: 28)
             y += 28
@@ -1116,7 +1129,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
             guard let b = window?.standardWindowButton(kind), let sv = b.superview else { continue }
             // Shown with whatever hosts them: the nav bar, or the sidebar header in palette mode.
-            b.isHidden = !fullScreen && (paletteMode ? !showSidebar : navH == 0)
+            b.isHidden = immersive || (!fullScreen && (paletteMode ? !showSidebar : navH == 0))
             if !fullScreen {
                 let yy = sv.bounds.height - style.navBar / 2 - b.frame.height / 2
                 b.setFrameOrigin(NSPoint(x: b.frame.origin.x, y: max(0, yy)))
@@ -1161,10 +1174,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         let opacity = activeWindow ? theme.outlineOpacity : theme.outlineInactiveOpacity
         let scale = window?.backingScaleFactor ?? 1
         let width = max(1 / scale, CGFloat(theme.outlineWidth))
-        contentFrame.isHidden = theme.outline != .content || fullScreen || focusMode
+        contentFrame.isHidden = theme.outline != .content || fullScreen || focusMode || pageFullscreen != nil
         contentFrame.color = color.withAlphaComponent(CGFloat(opacity))
         contentFrame.lineWidth = width
-        sidebar.updateOutline(color: color.withAlphaComponent(CGFloat(opacity)), width: width, visible: theme.outline == .seam && !fullScreen && !focusMode)
+        sidebar.updateOutline(color: color.withAlphaComponent(CGFloat(opacity)), width: width, visible: theme.outline == .seam && !fullScreen && !focusMode && pageFullscreen == nil)
     }
 }
 
@@ -1193,7 +1206,7 @@ extension BrowserWindowController {
             guard let tr = trees[id], !tr.isEmpty else { return nil }
             return SavedTree(workspaceID: id, tree: tr, activeTab: activeByWorkspace[id], split: storedSplits[id])
         }
-        return SavedWindow(frame: window.map { NSStringFromRect($0.frame) }, activeWorkspace: workspaceID, trees: saved,
+        return SavedWindow(frame: window.map { NSStringFromRect(pageFullscreen?.screen?.frame ?? $0.frame) }, activeWorkspace: workspaceID, trees: saved,
                            sidebarHidden: sidebarHidden, sidebarWidth: Double(sidebarWidth))
     }
 
@@ -1209,6 +1222,7 @@ extension BrowserWindowController {
     }
 
     func windowWillClose(_ notification: Notification) {
+        endPageFullscreen(of: nil, tellPage: false)
         sitePanel?.close()
         navBar.closeSuggestions()
         for (_, t) in tabs { t.unload() }
@@ -1220,10 +1234,23 @@ extension BrowserWindowController {
 
 /// The window: Esc falls through to angl after web content and fields had their chance.
 final class AnglWindow: NSWindow {
+    // Instant page full screen makes the window borderless, which otherwise can't take the keyboard.
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+
     override func cancelOperation(_ sender: Any?) {
         guard let c = windowController as? BrowserWindowController else { return }
         if c.findVisible { c.hideFind() } else if c.active?.isLoading == true { c.active?.webView?.stopLoading() }
         else if c.focusMode { c.toggleFocusMode() }
+    }
+
+    /// ⌃⌘F while a page is in instant full screen leaves it rather than stacking a Space on top.
+    override func toggleFullScreen(_ sender: Any?) {
+        if let c = windowController as? BrowserWindowController, c.pageFullscreen != nil {
+            c.endPageFullscreen(of: nil, tellPage: true)
+            return
+        }
+        super.toggleFullScreen(sender)
     }
 }
 

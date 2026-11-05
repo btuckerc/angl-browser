@@ -3,7 +3,7 @@
   // Mirrors AnglCore's Settings() so standalone previews render every control.
   const defaults = {
     search: { engine: 'https://duckduckgo.com/?q=%s', keywords: { d: 'https://duckduckgo.com/?q=%s', g: 'https://www.google.com/search?q=%s', w: 'https://en.wikipedia.org/wiki/Special:Search?search=%s', yt: 'https://www.youtube.com/results?search_query=%s', gh: 'https://github.com/search?q=%s', k: 'https://kagi.com/search?q=%s' } },
-    content: { javascript: true, blockRemoteFonts: false, blocker: true, square: true, dark: 'off', zoom: 1, nightAudio: false, blockAutoplay: true, youtubeFrames: true, hardening: 'off' },
+    content: { javascript: true, blockRemoteFonts: false, blocker: true, square: true, dark: 'off', zoom: 1, nightAudio: false, blockAutoplay: true, youtubeFrames: true, fullscreen: 'screen', autoPictureInPicture: false, youtubeQuality: 'auto', hardening: 'off' },
     tabs: { unloadAfterMinutes: 0, autoArchive: false, archiveAfterHours: 24, restoreOnLaunch: true, routeByURL: true, favorites: false, splitView: false, closeWindowWithLastTab: true },
     downloads: { folder: '~/Downloads' },
     privacy: { cleanURLs: true, safariUserAgent: true, forgetOnQuit: false, keepSignedIn: ['google.com', 'youtube.com'] },

@@ -182,6 +182,17 @@ function layout() {
         S('content.blockAutoplay', 'Block autoplay with sound', null, { keywords: 'video audio mute playback autoplay' }),
         S('content.nightAudio', 'Night audio', 'Evens out loud and quiet video.', { keywords: 'compressor volume normalize loudness youtube twitch dynamics' }),
         S('content.youtubeFrames', 'YouTube video stills', 'A frame from the video in place of the uploader’s thumbnail.', { keywords: 'youtube thumbnails clickbait frame still dearrow original' }),
+        S('content.fullscreen', 'Video full screen', 'How a page’s full-screen button behaves.', {
+          options: [['screen', 'Fill the screen at once'], ['window', 'Fill the window'], ['native', 'macOS full screen']],
+          keywords: 'fullscreen full screen video youtube twitch player space animation immersive theater',
+        }),
+        S('content.autoPictureInPicture', 'Picture in Picture on tab switch', 'A playing video follows you when you switch tabs (⌥⌘P any time).', {
+          keywords: 'pip picture in picture floating video mini player tab switch',
+        }),
+        S('content.youtubeQuality', 'YouTube quality', 'Best the video has up to this; picking in the player still works.', {
+          options: [['auto', 'Auto'], ['hd720', '720p'], ['hd1080', '1080p'], ['hd1440', '1440p'], ['hd2160', '4K'], ['highres', 'Highest']],
+          keywords: 'youtube resolution quality 1080p 4k hd video stream',
+        }),
         more('twitch-chat', 'Twitch chat', [
           S('twitch.emotes', 'Third-party emotes', 'BetterTTV, FrankerFaceZ and 7TV.', { keywords: 'twitch extensions chat emoji' }),
           S('twitch.bttv', 'BetterTTV', null, { keywords: 'bttv twitch chat emotes', dependsOn: [emotes] }),

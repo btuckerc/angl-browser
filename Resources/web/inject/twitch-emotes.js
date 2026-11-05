@@ -5,8 +5,9 @@
     return p[0] === 'popout' ? p[1] : p[0];
   };
   let channel = '', map = {}, list = null, observer = null, queued = new Set(), frame = 0;
+  // A native emote's size (28px at 100%); badges, the other images in a chat line, are smaller.
   const nativeHeight = () => {
-    const img = document.querySelector('[data-a-target="emote-name"] img, [data-a-target="chat-line-message"] img');
+    const img = document.querySelector('[data-a-target="emote-name"] img, img.chat-line__message--emote');
     return img ? (img.getBoundingClientRect().height || img.height || 28) : 28;
   };
   const fetchMap = async () => {
@@ -25,7 +26,7 @@
     const img = document.createElement('img');
     img.alt = code; img.title = code; img.src = emote.url1x; img.srcset = `${emote.url1x} 1x, ${emote.url2x} 2x`;
     img.loading = 'lazy'; img.decoding = 'async'; img.referrerPolicy = 'no-referrer';
-    img.dataset.anglEmote = code; img.style.height = `${nativeHeight()}px`; img.style.width = 'auto'; img.style.verticalAlign = 'middle';
+    img.dataset.anglEmote = code; img.style.height = `${emoteHeight()}px`; img.style.width = 'auto'; img.style.verticalAlign = 'middle';
     return img;
   };
   const process = root => {
@@ -51,7 +52,10 @@
       text.replaceWith(frag);
     }
   };
-  const enqueue = node => { if (!node) return; queued.add(node); if (!frame) frame = requestAnimationFrame(() => { frame = 0; const batch = [...queued]; queued.clear(); if (!document.hidden) for (const n of batch) if (n.isConnected) process(n); }); };
+  // Measuring forces a layout, and every replaced text node dirties it again: measure once per frame.
+  let height = 0;
+  const emoteHeight = () => height || (height = nativeHeight());
+  const enqueue = node => { if (!node) return; queued.add(node); if (!frame) frame = requestAnimationFrame(() => { frame = 0; height = 0; const batch = [...queued]; queued.clear(); if (!document.hidden) for (const n of batch) if (n.isConnected) process(n); }); };
   const locate = () => {
     const next = document.querySelector('[data-a-target="chat-scrollable-area__message-container"], [data-test-selector="chat-scrollable-area__message-container"]');
     if (!next || next === list) return;
