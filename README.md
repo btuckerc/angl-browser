@@ -162,6 +162,13 @@ ticket. Tags are `vVERSION` and match `VERSION`.
   width (0 turns peeking off), peek/hide delays, and whether the Space selector sits
   at the top or bottom of the sidebar.
 - **Window outline** (Appearance): none (default) leaves the edge to macOS, seam colours
+- **YouTube video stills** (Settings › Pages & media › Media, on): thumbnails show one of the
+  stills YouTube generates from the video (the middle of its three, at the smallest size that
+  matches the card: `sd2` for grid cards, `hq2` if an old video has none, and `mq2` for the
+  sidebar on a Retina screen) instead of the uploader's image. *Original* on a hovered
+  thumbnail swaps back. A WebKit rule list stops the uploader's card images downloading first
+  (WebKit fetches an image before a page script can swap it). Same files as Clickbait Remover
+  and DeArrow's fallback; no third-party service.
   the sidebar divider, content insets the page in a rounded frame. Colour: accent, border,
   active container or custom; width and active/inactive opacity are adjustable. The accent
   swatches are angl, white, blue, yellow, pink, or any custom colour. Hairlines and borders
@@ -212,6 +219,10 @@ Profiles are separate instances: `open -na angl --args --profile NAME`.
   sheet, without site matching, and no saving of new logins.
 - Cookie notices and other advanced rules run only for the page's own site: consent dialogs
   inside third-party frames (Sourcepoint, TrustArc…) are hidden from the page side at best.
+- YouTube video stills are YouTube's own picks, not the midpoint (measured at 25–39 % into the
+  video): an exact frame needs a watch-page fetch per video for the storyboard, which tops out at
+  320×180. Live streams, Shorts, the watch page's player image and brand-new uploads whose stills
+  don't exist yet keep the uploader's thumbnail.
   Extended selectors (`:has-text`, `:xpath`, `:upward`) are not supported, and banners in
   shadow DOM are out of reach.
 

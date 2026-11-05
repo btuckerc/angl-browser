@@ -43,6 +43,8 @@ public struct Settings: Codable, Equatable, Sendable {
         public var nightAudio = false
         /// Media never starts with sound until the user interacts with the page.
         public var blockAutoplay = true
+        /// YouTube thumbnails show one of YouTube's auto-generated video stills instead of the uploader's image.
+        public var youtubeFrames = true
         /// WebKit hardening: `.noJIT` runs JavaScript interpreter-only (macOS 26.4+
         /// `securityRestrictionMode = .maximizeCompatibility`); `.lockdown` is Lockdown Mode.
         public var hardening: Hardening = .off

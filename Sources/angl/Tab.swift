@@ -16,6 +16,8 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
     private var applied = Applied()
     /// night-audio.js is in the tab's scripts (it runs from the next load on).
     private var nightAudioInstalled = false
+    /// youtube-frames.js is in the tab's scripts; it must run wherever the YouTube rule list is.
+    private var youtubeFramesInstalled = false
     var muted = false
     /// Frames (status.js ids) that have reported media, and whether it plays now. WebKit's audio flag
     /// covers WebAudio and detached media; the frames are its fallback and carry volume updates to iframes.
@@ -240,19 +242,22 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
         let twitch = browser.settings.twitch
         let advancedEnabled = browser.settings.blocking.advanced && p.blocker
         let nightAudio = browser.settings.content.nightAudio
+        let youtubeFrames = browser.settings.content.youtubeFrames
         let blocker = browser.web.blocker
-        let lists = "\(p.blocker)|\(p.blockRemoteFonts)|\(blocker.lists.count)|\(blocker.manifest?.generated.timeIntervalSince1970 ?? 0)|\(blocker.fontList != nil)"
+        let lists = "\(p.blocker)|\(p.blockRemoteFonts)|\(blocker.lists.count)|\(blocker.manifest?.generated.timeIntervalSince1970 ?? 0)|\(blocker.fontList != nil)|\(youtubeFrames && blocker.youtubeList != nil)"
         if lists != applied.lists {
             applied.lists = lists
-            blocker.apply(p, to: c)
+            blocker.apply(p, youtubeFrames: youtubeFrames, to: c)
         }
         let scripts = browser.web.scripts.scripts(p, url: url, muted: scriptMuted, nightAudio: nightAudio, twitchEmotes: twitch.emotes,
+                                                  youtubeFrames: youtubeFrames,
                                                   advancedEntries: blocker.advancedEntries(for: url, enabled: advancedEnabled))
         if scripts != applied.scripts {
             applied.scripts = scripts
             browser.web.scripts.install(scripts, on: c)
         }
         nightAudioInstalled = nightAudio && p.javascript
+        youtubeFramesInstalled = youtubeFrames && InjectedScripts.isYouTube(url)
         let handlers = "\(isInternal)|\(Passwords.shared.enabled)|\(twitch.emotes)"
         if handlers != applied.handlers {
             applied.handlers = handlers
@@ -264,6 +269,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// Policy inputs changed (settings, block lists): next navigation re-applies.
     func invalidatePolicy() {
         let hadNightAudio = nightAudioInstalled
+        let hadYouTubeFrames = youtubeFramesInstalled
         applied = Applied()
         if let u = webView?.url { _ = applyPolicy(for: u) }
         // Switching Night audio off takes effect in the open page too, without a reload.
@@ -271,6 +277,13 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
             for frame in [nil] + mediaFrames.values.map(\.info).filter({ !$0.isMainFrame }) {
                 webView?.evaluateJavaScript("dispatchEvent(new Event('anglnightaudiooff'))", in: frame, in: .page) { _ in }
             }
+        }
+        // The YouTube rule list blocks the open page's new thumbnails at once, so the script has to
+        // run there now, not from the next load; switched off, it puts the originals back.
+        if !hadYouTubeFrames, youtubeFramesInstalled {
+            webView?.evaluateJavaScript(browser.web.scripts.source("youtube-frames.js"), in: nil, in: InjectedScripts.world) { _ in }
+        } else if hadYouTubeFrames, !youtubeFramesInstalled {
+            webView?.evaluateJavaScript("window.anglYouTubeFrames?.stop()", in: nil, in: InjectedScripts.world) { _ in }
         }
     }
 

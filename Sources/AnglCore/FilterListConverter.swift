@@ -166,6 +166,24 @@ public enum FilterListConverter {
     public static func fontBlockList() -> String {
         "[{\"action\":{\"type\":\"block\"},\"trigger\":{\"url-filter\":\".*\",\"resource-type\":[\"font\"]}}]"
     }
+
+    /// Uploader thumbnails on YouTube's own pages, for youtube-frames.js: WebKit starts fetching
+    /// an img's first src before the script can swap it for a video still. Only the resized card
+    /// images (`?sqp=`) loaded by the top frame are blocked (the script runs there); CSS
+    /// backgrounds such as the player and end-screen images aren't `?sqp=`. The script marks the
+    /// originals it puts back with `angl-original`.
+    public static func youtubeThumbnailBlockList() -> String {
+        let hosts = ["youtube.com", "www.youtube.com", "m.youtube.com"]
+        var rules: [[String: Any]] = ["hq720", "maxresdefault", "sddefault", "hqdefault", "mqdefault"].map { name in
+            ["trigger": ["url-filter": "^https?://i[0-9]?\\.ytimg\\.com/vi(_webp)?/[^/]+/\(name)(_custom_[0-9]+)?\\.[a-z]+\\?sqp=",
+                         "resource-type": ["image"], "if-domain": hosts, "load-context": ["top-frame"]],
+             "action": ["type": "block"]]
+        }
+        rules.append(["trigger": ["url-filter": "[?&]angl-original", "resource-type": ["image"]],
+                      "action": ["type": "ignore-previous-rules"]])
+        let data = try! JSONSerialization.data(withJSONObject: rules, options: [.sortedKeys])
+        return String(decoding: data, as: UTF8.self)
+    }
 }
 
 /// Runtime reader for the prebuilt SafariConverterLib advanced-rule index.

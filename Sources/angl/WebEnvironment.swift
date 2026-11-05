@@ -193,6 +193,7 @@ final class ContentBlocker {
     private let paths: Paths
     private(set) var lists: [WKContentRuleList] = []
     private(set) var fontList: WKContentRuleList?
+    private(set) var youtubeList: WKContentRuleList?
     private(set) var manifest: FilterListManifest?
     private var advancedLookup: AdvancedRuleLookup?
     private(set) var busy = false
@@ -256,6 +257,14 @@ final class ContentBlocker {
             fontList = try? await store.compileContentRuleList(
                 forIdentifier: "angl-fonts", encodedContentRuleList: FilterListConverter.fontBlockList())
         }
+        Task {
+            youtubeList = try? await store.compileContentRuleList(
+                forIdentifier: "angl-youtube-frames", encodedContentRuleList: FilterListConverter.youtubeThumbnailBlockList())
+            // Tabs restored before it compiled get it now.
+            if youtubeList != nil, Browser.shared.settings.content.youtubeFrames {
+                Browser.shared.windows.forEach { $0.refreshContentPolicies() }
+            }
+        }
     }
 
     /// Settings changed: if the enabled lists differ from the installed build, switch to a matching
@@ -316,7 +325,7 @@ final class ContentBlocker {
         lists = found.compactMap { $0 }
         manifest = m
         // Drop compiled lists from older manifests.
-        let keep = Set(m.chunks.map(\.id)).union(["angl-fonts"])
+        let keep = Set(m.chunks.map(\.id)).union(["angl-fonts", "angl-youtube-frames"])
         if let ids = await store.availableIdentifiers() {
             for id in ids where id.hasPrefix("angl-") && !keep.contains(id) {
                 try? await store.removeContentRuleList(forIdentifier: id)
@@ -349,10 +358,11 @@ final class ContentBlocker {
     }
 
     /// Install the right lists on a tab's controller for a page's policy.
-    func apply(_ policy: SitePolicy, to controller: WKUserContentController) {
+    func apply(_ policy: SitePolicy, youtubeFrames: Bool, to controller: WKUserContentController) {
         controller.removeAllContentRuleLists()
         if policy.blocker { lists.forEach(controller.add) }
         if policy.blockRemoteFonts, let fontList { controller.add(fontList) }
+        if youtubeFrames, let youtubeList { controller.add(youtubeList) }
     }
 }
 
@@ -452,7 +462,7 @@ final class InjectedScripts {
     }
 
     /// The scripts a page gets for its policy, in injection order.
-    func scripts(_ policy: SitePolicy, url: URL?, muted: Bool, nightAudio: Bool, twitchEmotes: Bool,
+    func scripts(_ policy: SitePolicy, url: URL?, muted: Bool, nightAudio: Bool, twitchEmotes: Bool, youtubeFrames: Bool,
                  advancedEntries: [FilterListConverter.AdvancedEntry] = []) -> [Script] {
         var out: [Script] = []
         let w = InjectedScripts.world
@@ -465,6 +475,9 @@ final class InjectedScripts {
             .replacingOccurrences(of: "__ANGL_MUTED__", with: muted ? "true" : "false")
         if twitchEmotes, ["twitch.tv", "www.twitch.tv", "m.twitch.tv"].contains(url?.host?.lowercased() ?? "") {
             add(source("twitch-emotes.js"), .atDocumentStart, mainOnly: false, world: InjectedScripts.twitchWorld)
+        }
+        if youtubeFrames, InjectedScripts.isYouTube(url) {
+            add(source("youtube-frames.js"), .atDocumentStart, mainOnly: true)
         }
         add(volume, .atDocumentStart, mainOnly: false)
         if policy.square { add(InjectedScripts.squareScript, .atDocumentStart, mainOnly: false) }
@@ -482,6 +495,10 @@ final class InjectedScripts {
         advanced(advancedEntries) { src, time, mainOnly, world in add(src, time, mainOnly: mainOnly, world: world) }
         if Passwords.shared.enabled { add(source("passwords.js"), .atDocumentStart, mainOnly: false, world: Passwords.world) }
         return out
+    }
+
+    static func isYouTube(_ url: URL?) -> Bool {
+        ["youtube.com", "www.youtube.com", "m.youtube.com"].contains(url?.host?.lowercased() ?? "")
     }
 
     static let twitchWorld = WKContentWorld.world(name: "angl-twitch")

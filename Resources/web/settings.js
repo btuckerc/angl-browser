@@ -181,6 +181,7 @@ function layout() {
       group('Media', [
         S('content.blockAutoplay', 'Block autoplay with sound', null, { keywords: 'video audio mute playback autoplay' }),
         S('content.nightAudio', 'Night audio', 'Evens out loud and quiet video.', { keywords: 'compressor volume normalize loudness youtube twitch dynamics' }),
+        S('content.youtubeFrames', 'YouTube video stills', 'A frame from the video in place of the uploader’s thumbnail.', { keywords: 'youtube thumbnails clickbait frame still dearrow original' }),
         more('twitch-chat', 'Twitch chat', [
           S('twitch.emotes', 'Third-party emotes', 'BetterTTV, FrankerFaceZ and 7TV.', { keywords: 'twitch extensions chat emoji' }),
           S('twitch.bttv', 'BetterTTV', null, { keywords: 'bttv twitch chat emotes', dependsOn: [emotes] }),
