@@ -125,7 +125,7 @@ ticket. Tags are `vVERSION` and match `VERSION`.
 - **Picture in Picture** (⌥⌘P): the page's playing video (or its largest) floats in macOS
   Picture in Picture; again to bring it back. *Picture in Picture on tab switch* (off) does it
   for you when you leave a tab with a playing video, and ends it when you come back. A video you
-  put in Picture in Picture yourself stays there.
+  put in Picture in Picture yourself stays there when you leave its tab and come back.
 - **YouTube quality** (Settings › Pages & media › Media, Auto): each video starts at the best
   quality it has up to the chosen one (720p…4K, Highest), as if picked in the player's menu;
   picking another there still works. Applies from the next page load.

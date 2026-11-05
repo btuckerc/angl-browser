@@ -106,13 +106,14 @@ extension BrowserWindowController {
         }
         guard browser.settings.content.autoPictureInPicture, let previous, previous.isPlaying,
               previous.webView?.superview == nil else { return }
-        previous.autoPictureInPicture = true
         Task { [weak self] in
-            guard await previous.pictureInPicture(.enter) == .on else { previous.autoPictureInPicture = false; return }
-            // Came back while it was entering: the exit above found nothing to end.
+            // Marked only once angl has put the video there: `already` is the user's own PiP.
+            guard await previous.pictureInPicture(.enter) == .on else { return }
+            // Came back while it was entering: there was nothing to end on the way in.
             if self?.active === previous || previous.webView?.superview != nil {
-                previous.autoPictureInPicture = false
                 await previous.pictureInPicture(.exit)
+            } else {
+                previous.autoPictureInPicture = true
             }
         }
     }
