@@ -547,7 +547,10 @@ final class TabRowView: NSTableRowView {
         didSet { (view(atColumn: 0) as? TabCell)?.hovering = hovering; needsDisplay = true }
     }
 
-    override var isEmphasized: Bool { get { false } set {} }
+    /// AppKit's emphasis means "the tree has the keyboard": instead of its blue fill, a keyboard row other than
+    /// the active tab (which has its own accent bar) gets an accent outline, so the arrow keys show where they are.
+    private var keyboardFocus = false { didSet { if keyboardFocus != oldValue { needsDisplay = true } } }
+    override var isEmphasized: Bool { get { false } set { keyboardFocus = newValue } }
 
     override func updateTrackingAreas() {
         trackingAreas.forEach(removeTrackingArea)
@@ -576,6 +579,10 @@ final class TabRowView: NSTableRowView {
         if isActiveTab { drawBackground(in: dirtyRect); return }
         s.raised.setFill(); bounds.fill()
         s.border.setFill(); NSRect(x: 0, y: 0, width: 2, height: bounds.height).fill()
+        if keyboardFocus {
+            s.accent.setStroke()
+            NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5)).stroke()
+        }
     }
 }
 
@@ -759,6 +766,33 @@ final class WorkspaceStrip: NSView, NSViewToolTipOwner {
         super.layout()
         removeAllToolTips()
         addToolTip(bounds, owner: self, userData: nil)
+        axItems = nil
+    }
+
+    // MARK: Accessibility: each Space a radio button, then New Space.
+
+    private var axItems: [PressableElement]?
+    /// Whatever redraws the strip may have changed its Spaces.
+    override var needsDisplay: Bool { didSet { if needsDisplay { axItems = nil } } }
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .group }
+    override func accessibilityLabel() -> String? { "Spaces" }
+    override func accessibilityChildren() -> [Any]? {
+        if let axItems { return axItems }
+        let o = owner
+        var items = workspaces.enumerated().map { i, w in
+            let e = PressableElement(.radioButton, w.name, in: self)
+            e.setAccessibilityValue(w.id == o.workspaceID ? 1 : 0)
+            if i < 9 { e.setAccessibilityHelp("⌃\(i + 1)") }
+            e.press = { o.switchWorkspace(index: i); return true }
+            return e
+        }
+        let add = PressableElement(.button, "New Space", in: self)
+        add.press = { o.newWorkspace(); return true }
+        items.append(add)
+        for (i, e) in items.enumerated() { e.place(rect(i), in: self) }
+        axItems = items
+        return items
     }
 
     override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
@@ -827,7 +861,7 @@ final class PinnedRows: NSView, NSViewToolTipOwner {
                 img?.draw(in: NSRect(x: 12, y: r.midY - 7, width: 14, height: 14), from: .zero, operation: .sourceOver,
                           fraction: loaded ? 1 : 0.55, respectFlipped: true, hints: nil)
                 let attrs: [NSAttributedString.Key: Any] = [.font: s.ui, .foregroundColor: loaded ? s.primary : s.muted]
-                let title = (t?.displayTitle ?? (n.title.isEmpty ? n.url.map(Omnibox.display) ?? "New Tab" : n.title)) as NSString
+                let title = self.title(n, t) as NSString
                 let th = ceil(title.size(withAttributes: attrs).height)
                 var titleRight: CGFloat = 8
                 if let t, t.muted || t.isPlaying,
@@ -875,6 +909,36 @@ final class PinnedRows: NSView, NSViewToolTipOwner {
         super.layout()
         removeAllToolTips()
         addToolTip(bounds, owner: self, userData: nil)
+        axRows = nil
+    }
+
+    // MARK: Accessibility: a list of rows, like the tree's outline rows.
+
+    private var axRows: [PressableElement]?
+    /// Whatever redraws the rows may have changed the pinned tabs or the active one.
+    override var needsDisplay: Bool { didSet { if needsDisplay { axRows = nil } } }
+    override func isAccessibilityElement() -> Bool { !nodes.isEmpty }
+    override func accessibilityRole() -> NSAccessibility.Role? { .list }
+    override func accessibilityLabel() -> String? { "Pinned tabs" }
+    override func accessibilityChildren() -> [Any]? {
+        if let axRows { return axRows }
+        let o = owner
+        let rows = nodes.enumerated().map { i, n in
+            let e = PressableElement(.row, title(n, o.liveTab(n)), in: self, selected: o.active?.node === n)
+            e.press = { [weak n] in
+                guard let n else { return false }
+                o.activate(o.tab(n))
+                return true
+            }
+            e.place(rect(i), in: self)
+            return e
+        }
+        axRows = rows
+        return rows
+    }
+
+    private func title(_ n: TabNode, _ t: Tab?) -> String {
+        t?.displayTitle ?? (n.title.isEmpty ? n.url.map(Omnibox.display) ?? "New Tab" : n.title)
     }
 
     override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation { .move }
@@ -920,16 +984,20 @@ final class FavoriteStrip: NSView, NSViewToolTipOwner {
     override func mouseDown(with event: NSEvent) {
         MainActor.assumeIsolated {
             let items = bookmarks
-            guard let i = index(at: convert(event.locationInWindow, from: nil)),
-                  let url = items[i].url.flatMap(URL.init(string:)) else { return }
-            let containerID = owner.active?.node.containerID
-            if let match = owner.tree.allTabs.first(where: { $0.url == url && $0.containerID == containerID }) {
-                owner.activate(owner.tab(match))
-            } else {
-                let node = TabNode.tab(url, containerID: containerID)
-                owner.tree.insert(node)
-                owner.activate(owner.tab(node))
-            }
+            guard let i = index(at: convert(event.locationInWindow, from: nil)) else { return }
+            open(items[i])
+        }
+    }
+
+    private func open(_ bookmark: Bookmark) {
+        guard let url = bookmark.url.flatMap(URL.init(string:)) else { return }
+        let containerID = owner.active?.node.containerID
+        if let match = owner.tree.allTabs.first(where: { $0.url == url && $0.containerID == containerID }) {
+            owner.activate(owner.tab(match))
+        } else {
+            let node = TabNode.tab(url, containerID: containerID)
+            owner.tree.insert(node)
+            owner.activate(owner.tab(node))
         }
     }
 
@@ -952,6 +1020,27 @@ final class FavoriteStrip: NSView, NSViewToolTipOwner {
         super.layout()
         removeAllToolTips()
         addToolTip(bounds, owner: self, userData: nil)
+        axItems = nil
+    }
+
+    // MARK: Accessibility: a button per favourite.
+
+    private var axItems: [PressableElement]?
+    override var needsDisplay: Bool { didSet { if needsDisplay { axItems = nil } } }
+    override func isAccessibilityElement() -> Bool { !isHidden }
+    override func accessibilityRole() -> NSAccessibility.Role? { .group }
+    override func accessibilityLabel() -> String? { "Favorites" }
+    override func accessibilityChildren() -> [Any]? {
+        if let axItems { return axItems }
+        let items = bookmarks.enumerated().map { i, b in
+            let e = PressableElement(.button, b.title.isEmpty ? b.url ?? "" : b.title, in: self)
+            e.setAccessibilityHelp(b.url)
+            e.press = { [weak self] in self?.open(b); return self != nil }
+            e.place(rect(i), in: self)
+            return e
+        }
+        axItems = items
+        return items
     }
 }
 

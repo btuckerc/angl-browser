@@ -195,6 +195,10 @@ ticket. Tags are `vVERSION` and match `VERSION`.
   lights) hides the sidebar; hover the left edge to peek. Appearance sets the edge catch
   width (0 turns peeking off), peek/hide delays, and whether the Space selector sits
   at the top or bottom of the sidebar.
+- **Keyboard and VoiceOver**: ⇧⌘E puts the keyboard in the tab tree, where an accent outline
+  marks the row the arrow keys are on. VoiceOver reads and presses the sidebar buttons, the
+  address pill, Space squares, pinned tabs, favourites and palette rows, hears toasts, and
+  names the window after its page.
 - **Window outline** (Appearance): none (default) leaves the edge to macOS, seam colours
   the sidebar divider, content insets the page in a rounded frame. Colour: accent, border,
   active container or custom; width and active/inactive opacity are adjustable. The accent

@@ -147,12 +147,41 @@ final class GlyphButton: NSView {
 
     override func accessibilityRole() -> NSAccessibility.Role? { .button }
     override func isAccessibilityElement() -> Bool { true }
-    override func accessibilityPerformPress() -> Bool { action?(); return true }
+    override func isAccessibilityEnabled() -> Bool { isEnabled }
+    /// VoiceOver's name is the tooltip without its shortcut ("Back (⌘[)" reads "Back"); the tooltip stays the help.
+    override func accessibilityLabel() -> String? {
+        if let set = super.accessibilityLabel(), !set.isEmpty { return set }
+        guard let tip = toolTip else { return text }
+        return tip.range(of: " (", options: .backwards).map { String(tip[..<$0.lowerBound]) } ?? tip
+    }
+    override func accessibilityPerformPress() -> Bool {
+        guard isEnabled, let action else { return false }
+        action()
+        return true
+    }
 }
 
-/// VoiceOver's handle on one hand-drawn row (palette suggestions, login picker); "press" picks it.
+/// VoiceOver's handle on one hand-drawn item (palette suggestions, login picker, sidebar strips); "press" picks it.
 final class PressableElement: NSAccessibilityElement {
     var press: () -> Bool = { false }
+
+    convenience init(_ role: NSAccessibility.Role, _ label: String, in parent: NSView, selected: Bool = false) {
+        self.init()
+        setAccessibilityElement(true)
+        setAccessibilityRole(role)
+        setAccessibilityLabel(label)
+        setAccessibilityParent(parent)
+        setAccessibilitySelected(selected)
+    }
+
+    /// `r` is in the parent's own coordinates. AX parent space is bottom-up even for a flipped view:
+    /// unflipped, VoiceOver's cursor lands on the mirrored item.
+    func place(_ r: NSRect, in parent: NSView) {
+        var r = r
+        if parent.isFlipped { r.origin.y = parent.bounds.height - r.maxY }
+        setAccessibilityFrameInParentSpace(r)
+    }
+
     override func accessibilityPerformPress() -> Bool { press() }
 }
 

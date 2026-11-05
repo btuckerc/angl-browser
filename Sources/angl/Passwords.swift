@@ -1323,12 +1323,8 @@ private final class PickerList: NSView {
 
     private func rebuildAccessibility() {
         axRows = rows.enumerated().map { index, row in
-            let e = PressableElement()
-            e.setAccessibilityElement(true)
-            e.setAccessibilityRole(row.selectable ? .row : .staticText)
-            e.setAccessibilityLabel(row.accessibilityLabel)
-            e.setAccessibilityParent(self)
-            e.setAccessibilitySelected(index == selected)
+            let e = PressableElement(row.selectable ? .row : .staticText, row.accessibilityLabel, in: self,
+                                     selected: index == selected)
             if row.selectable {
                 e.press = { [weak self] in
                     guard let self, self.rows.indices.contains(index) else { return false }
@@ -1345,7 +1341,7 @@ private final class PickerList: NSView {
     }
 
     private func layoutAccessibility() {
-        for (i, e) in axRows.enumerated() { e.setAccessibilityFrameInParentSpace(rowRect(i)) }
+        for (i, e) in axRows.enumerated() { e.place(rowRect(i), in: self) }
     }
 
     override func setFrameSize(_ newSize: NSSize) {

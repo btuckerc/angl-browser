@@ -137,6 +137,10 @@ final class StatusOverlay: FlatView {
             MainActor.assumeIsolated { self?.toast = nil; self?.render() }
         }
         render()
+        // Drawn, not focused: VoiceOver hears the toast only through an announcement.
+        let target: Any = window ?? NSApp as Any
+        NSAccessibility.post(element: target, notification: .announcementRequested,
+                             userInfo: [.announcement: message, .priority: NSAccessibilityPriorityLevel.high.rawValue])
     }
 
     func reposition(in bounds: NSRect) {

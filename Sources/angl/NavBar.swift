@@ -585,12 +585,7 @@ final class SuggestionList: NSView {
     override func accessibilityChildren() -> [Any]? {
         if let axRows { return axRows }
         let rows = items.enumerated().map { i, item in
-            let e = PressableElement()
-            e.setAccessibilityElement(true)
-            e.setAccessibilityRole(.row)
-            e.setAccessibilityLabel(item.accessibilityLabel)
-            e.setAccessibilityParent(self)
-            e.setAccessibilitySelected(i == selected)
+            let e = PressableElement(.row, item.accessibilityLabel, in: self, selected: i == selected)
             e.press = { [weak self] in
                 guard let self, self.items.indices.contains(i) else { return false }
                 self.selected = i
@@ -604,14 +599,8 @@ final class SuggestionList: NSView {
         return rows
     }
 
-    /// AX parent space is bottom-up even for a flipped view: without the flip VoiceOver's cursor lands on
-    /// the mirrored row.
     private func layoutAccessibility() {
-        for (i, e) in (axRows ?? []).enumerated() {
-            var r = rowRect(i)
-            r.origin.y = bounds.height - r.maxY
-            e.setAccessibilityFrameInParentSpace(r)
-        }
+        for (i, e) in (axRows ?? []).enumerated() { e.place(rowRect(i), in: self) }
     }
 
     override func setFrameSize(_ newSize: NSSize) {

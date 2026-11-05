@@ -365,8 +365,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         // Hand the keyboard over unless something else (sidebar, find bar) holds it; a hidden docked field doesn't count.
         let free = window?.firstResponder === window || window?.firstResponder == nil || (blank.isHidden && blank.holdsKeyboard)
         if free { if let wv = active?.webView { window?.makeFirstResponder(wv) } else { blank.takeKeyboard() } }
+        updateWindowTitle()
     }
 
+    /// Hidden on screen; VoiceOver, Mission Control and the Dock name the window after its page.
+    private func updateWindowTitle() {
+        let title = active?.displayTitle ?? "angl"
+        if window?.title != title { window?.title = title }
+    }
 
     private func collapseSplit(containing ids: Set<UUID>, workspace ws: UUID) {
         guard let split = splits[ws], ids.contains(split.first) || ids.contains(split.second) else { return }
@@ -791,7 +797,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
 
     func tabChanged(_ t: Tab) {
         sidebar.reload(node: t.node)
-        if t === active { navBar.update() }
+        if t === active { navBar.update(); updateWindowTitle() }
     }
 
     func progressChanged(_ t: Tab) {

@@ -414,7 +414,7 @@ final class SidebarPaletteHeader: FlatView, NSGestureRecognizerDelegate {
     weak var owner: BrowserWindowController?
     private let back = GlyphButton(size: 24), forward = GlyphButton(size: 24), reload = GlyphButton(size: 24)
     private let hide = GlyphButton(size: 24)
-    private let pill = FlatView(), square = FlatView(), url = NSTextField(labelWithString: ""), site = GlyphButton(size: 22)
+    private let pill = FlatView(), square = FlatView(), url = AddressLabel(labelWithString: ""), site = GlyphButton(size: 22)
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -428,6 +428,7 @@ final class SidebarPaletteHeader: FlatView, NSGestureRecognizerDelegate {
         reload.action = { [weak self] in guard let t = self?.owner?.active else { return }; if t.isLoading { t.webView?.stopLoading() } else { t.reload(fromOrigin: false) } }
         hide.action = { [weak self] in self?.owner?.toggleSidebar() }
         site.action = { [weak self] in self?.owner?.showSitePanel() }
+        url.press = { [weak self] in self?.openPalette() }
         let click = NSClickGestureRecognizer(target: self, action: #selector(openPalette))
         click.delegate = self
         pill.addGestureRecognizer(click)
@@ -485,4 +486,13 @@ final class SidebarPaletteHeader: FlatView, NSGestureRecognizerDelegate {
     }
     override func mouseDown(with event: NSEvent) { if event.clickCount == 2 { window?.performZoom(nil) } else { window?.performDrag(with: event) } }
     @objc private func openPalette() { owner?.openAddressPalette(prefill: owner?.active?.url?.absoluteString, newTab: false) }
+}
+
+/// The pill's address, which VoiceOver gets as the button the pill is: press edits the address (⌘L).
+private final class AddressLabel: NSTextField {
+    var press: () -> Void = {}
+    override func accessibilityRole() -> NSAccessibility.Role? { .button }
+    override func accessibilityLabel() -> String? { stringValue.isEmpty ? "Address" : "Address, \(stringValue)" }
+    override func accessibilityHelp() -> String? { "Edit the address (⌘L)" }
+    override func accessibilityPerformPress() -> Bool { press(); return true }
 }
