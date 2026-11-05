@@ -4,6 +4,31 @@ import XCTest
 final class TabTreeTests: XCTestCase {
     private func tab(_ title: String) -> TabNode { TabNode.tab(URL(string: "https://\(title).test")!, title: title) }
 
+    /// The sidebar skips rebuilding rows when the revision is unchanged, so every structural edit,
+    /// in any tree, must move it.
+    func testEveryStructuralChangeBumpsRevision() {
+        let t = TabTree(), other = TabTree()
+        let a = tab("a"), b = tab("b"), c = tab("c")
+        var last = TabTree.revision
+        func changed(_ what: String, _ edit: () -> Void) {
+            edit()
+            XCTAssertNotEqual(TabTree.revision, last, what)
+            last = TabTree.revision
+        }
+        changed("insert") { t.insert(a) }
+        changed("insert under") { t.insert(b, under: a) }
+        changed("insert after") { t.insert(c, after: a) }
+        changed("pin") { t.pin(c) }
+        changed("unpin") { t.unpin(c) }
+        changed("group") { _ = t.group([a], name: "F") }
+        changed("ungroup") { t.ungroup(a.parent!) }
+        changed("remove") { t.remove(c) }
+        changed("move to another tree") { other.insert(b) }
+        changed("remove subtree") { t.removeSubtree(a) }
+        _ = t.node(a.id); _ = t.allTabs
+        XCTAssertEqual(TabTree.revision, last, "reads leave it alone")
+    }
+
     func testClosingParentPromotesChildrenInPlace() {
         let t = TabTree()
         let a = tab("a"), b = tab("b"), c = tab("c"), d = tab("d")

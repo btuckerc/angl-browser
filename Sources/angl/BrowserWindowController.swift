@@ -259,8 +259,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
             storedSplits[workspaceID] = split.saved
         }
         t.node.lastActive = Date()
+        var expanded = false
         var a = t.node.parent
-        while let n = a { n.collapsed = false; a = n.parent }
+        while let n = a { if n.collapsed { n.collapsed = false; expanded = true }; a = n.parent }
         if t.url != nil { t.load() }
         if let s = splits[workspaceID], let other = tree.node(s.focused == s.first ? s.second : s.first) {
             let otherTab = tab(other)
@@ -269,7 +270,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         attachActive()
         if previous !== t { switchPictureInPicture(from: previous, to: t) }
         if previous !== t, navBar.editing, !navBar.typed, let wv = t.webView { window?.makeFirstResponder(wv) }
-        sidebar.reload()
+        if expanded || splits[workspaceID] != nil { sidebar.reload() } else { sidebar.activeChanged(from: previous?.node) }
         sitePanel?.close()
         if !findBar.isHidden { findBar.isHidden = true; root.needsLayout = true }
         browser.markSessionDirty()

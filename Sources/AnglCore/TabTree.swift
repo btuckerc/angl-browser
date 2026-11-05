@@ -58,6 +58,10 @@ public final class TabTree {
 
     public init() {}
 
+    /// Bumped by every structural change to any tree (a node can move between trees), so a view can
+    /// tell whether the rows it built still match. Main-thread only, like the trees.
+    nonisolated(unsafe) public private(set) static var revision = 0
+
     public var isEmpty: Bool { root.children.isEmpty && pinned.isEmpty }
 
     /// Every tab (not folder), pinned first, then tree order.
@@ -78,6 +82,7 @@ public final class TabTree {
         let p = parent ?? root
         precondition(node !== p && !node.isAncestor(of: p), "cycle")
         unlink(node)
+        Self.revision += 1
         let i = min(max(index ?? p.children.count, 0), p.children.count)
         p.children.insert(node, at: i)
         node.parent = p
@@ -98,6 +103,7 @@ public final class TabTree {
         // Children of a pinned tab stay in the tree where the tab was.
         promoteChildren(of: node)
         unlink(node)
+        Self.revision += 1
         pinned.insert(node, at: min(index ?? pinned.count, pinned.count))
     }
 
@@ -110,6 +116,7 @@ public final class TabTree {
     /// Remove a node, lifting its children into its place (Sidebery behaviour). Returns removed tabs.
     @discardableResult
     public func remove(_ node: TabNode) -> [TabNode] {
+        Self.revision += 1
         if isPinned(node) { pinned.removeAll { $0 === node }; return [node] }
         promoteChildren(of: node)
         node.detach()
@@ -121,6 +128,7 @@ public final class TabTree {
     public func removeSubtree(_ node: TabNode) -> [TabNode] {
         if isPinned(node) { return remove(node) }
         let tabs = node.subtree.filter { !$0.isFolder }
+        Self.revision += 1
         node.detach()
         return tabs
     }

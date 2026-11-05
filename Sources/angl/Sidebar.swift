@@ -24,6 +24,9 @@ final class SidebarView: FlatView, NSOutlineViewDataSource, NSOutlineViewDelegat
     private var renaming: TabNode?
     /// True while reloadData re-expands rows; expand/collapse callbacks must not persist it.
     private var syncing = false
+    /// The tree and `TabTree.revision` the outline's rows were last built from.
+    private weak var syncedTree: TabTree?
+    private var syncedRevision = -1
 
     var tree: TabTree { owner.tree }
     private let paletteHeader = SidebarPaletteHeader()
@@ -156,6 +159,8 @@ final class SidebarView: FlatView, NSOutlineViewDataSource, NSOutlineViewDelegat
         }
         tree.root.children.forEach(expand)
         syncing = false
+        syncedTree = tree
+        syncedRevision = TabTree.revision
         if let a = owner.active?.node {
             let row = outline.row(forItem: a)
             if row >= 0 {
@@ -166,6 +171,30 @@ final class SidebarView: FlatView, NSOutlineViewDataSource, NSOutlineViewDelegat
             } else {
                 outline.deselectAll(nil)
             }
+        }
+        updateFooter()
+    }
+
+    /// After a tab switch with no structural change since the last reload: restyle the two rows and
+    /// move the selection instead of rebuilding every row. Anything else takes the full reload.
+    func activeChanged(from previous: TabNode?) {
+        guard renaming == nil, syncedTree === tree, syncedRevision == TabTree.revision,
+              let a = owner.active?.node else { reload(); return }
+        let row = outline.row(forItem: a)
+        guard row >= 0 || tree.isPinned(a) else { reload(); return }
+        favorites.needsDisplay = true
+        strip.needsDisplay = true
+        pinned.needsDisplay = true
+        paletteHeader.applyStyle()
+        if let previous, previous !== a { reload(node: previous) }
+        reload(node: a)
+        if row < 0 {
+            outline.deselectAll(nil)
+        } else {
+            if !outline.selectedRowIndexes.contains(row) || outline.selectedRowIndexes.count > 1 {
+                outline.selectRowIndexes([row], byExtendingSelection: false)
+            }
+            outline.scrollRowToVisible(row)
         }
         updateFooter()
     }
