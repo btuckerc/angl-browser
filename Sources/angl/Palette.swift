@@ -212,6 +212,8 @@ final class PalettePanel: NSPanel {
         present()
     }
 
+    var showsTabChooser: Bool { isVisible && view.tabChooser }
+
     private func present() {
         guard let parent = owner.window else { return }
         let width = min(640, max(1, owner.content.bounds.width - 64))

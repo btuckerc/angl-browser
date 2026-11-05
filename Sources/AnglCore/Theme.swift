@@ -71,8 +71,9 @@ public struct Theme: Codable, Equatable, Sendable {
             let extremes = ["#ffffff", "#000000"].sorted { worst($0) > worst($1) }
             for end in [fg.primary] + extremes {
                 guard let to = parseHexColor(end) else { continue }
-                for step in 1...20 {
-                    let t = Double(step) / 20
+                // One step per 8-bit level, so no passing colour between two steps is skipped.
+                for step in 1...255 {
+                    let t = Double(step) / 255
                     func mix(_ x: Double, _ y: Double) -> Int { Int(((x * (1 - t) + y * t) * 255).rounded()) }
                     let candidate = String(format: "#%02x%02x%02x", mix(from.r, to.r), mix(from.g, to.g), mix(from.b, to.b))
                     if worst(candidate) >= ratio { return candidate }

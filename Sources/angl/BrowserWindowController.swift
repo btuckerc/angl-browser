@@ -1164,7 +1164,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         permissionBar.applyStyle(s)
         status.applyStyle(s)
         blank.applyStyle(s)
-        if !paletteMode, palette.isVisible { palette.closePalette() }
+        // The address palette only belongs to palette mode; the split chooser works in either and restyles in place.
+        if !paletteMode, palette.isVisible, !palette.showsTabChooser { palette.closePalette() }
         progressLine.fill = s.accent
         for (_, t) in tabs { t.webView?.underPageBackgroundColor = s.base }
         root.needsLayout = true
