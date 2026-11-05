@@ -169,9 +169,9 @@ public enum FilterListConverter {
 
     /// Uploader thumbnails on YouTube's own pages, for youtube-frames.js: WebKit starts fetching
     /// an img's first src before the script can swap it for a video still. Only the resized card
-    /// images (`?sqp=`) loaded by the top frame are blocked (the script runs there); CSS
-    /// backgrounds such as the player and end-screen images aren't `?sqp=`. The script marks the
-    /// originals it puts back with `angl-original`.
+    /// images (`?sqp=`) loaded by the top frame are blocked (the script runs there). The script
+    /// marks the originals it puts back, in imgs and inline CSS backgrounds (the masthead ad's
+    /// player poster), with `angl-original`.
     public static func youtubeThumbnailBlockList() -> String {
         let hosts = ["youtube.com", "www.youtube.com", "m.youtube.com"]
         var rules: [[String: Any]] = ["hq720", "maxresdefault", "sddefault", "hqdefault", "mqdefault"].map { name in

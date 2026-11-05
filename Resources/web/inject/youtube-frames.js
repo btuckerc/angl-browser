@@ -12,7 +12,8 @@
   const THUMB = /^https?:\/\/i\d?\.ytimg\.com\/vi(?:_webp)?\/([^/]+)\/(hq720|maxresdefault|sddefault|hqdefault|mqdefault)(?:_custom_\d+)?\.[a-z]+(?:[?#]|$)/i;
   // WebKit starts fetching an img's first source before this script sees it, so the rule list
   // blocks the resized card thumbnails (?sqp=) THUMB matches. The query marker exempts the
-  // originals put back here; every THUMB match is either swapped or marked.
+  // originals put back here; every THUMB match in an img or an inline CSS background is either
+  // swapped or marked.
   const MARK = 'angl-original';
   const MARKED = /[?&]angl-original(?:[=&]|$)/;
   const split = url => { const h = url.indexOf('#'); return h < 0 ? [url, ''] : [url.slice(0, h), url.slice(h)]; };
@@ -35,7 +36,7 @@
   };
   const frameURL = (id, file) => `https://i.ytimg.com/vi_webp/${id}/${file}.webp`;
 
-  const state = new WeakMap(); // img → { source, original (marked), id, steps, key, step, frame, showing, fit }
+  const state = new WeakMap(); // img → { source, original (marked), id, steps, key, step, frame, showing, fit, failed }
   const known = new Map();   // `${id}|${first still}` → working step, or -1 when none loads
   const listening = new WeakSet();
   // Every img ever taken over, weakly, so stop() also reaches cards YouTube has detached to reuse.
@@ -85,13 +86,14 @@
     show(img, s.source);
   };
 
+  // No still loads: the uploader's image, marked; the state stays so stop() can unmark it.
   const failed = img => {
     const s = state.get(img);
     if (!s || s.showing !== 'frame') return;
     if (++s.step < s.steps.length) { setFrame(img, s); return; }
     known.set(s.key, -1);
+    s.failed = true;
     setOriginal(img, s);
-    state.delete(img);
     if (hovered === img) hide();
   };
   // On the img itself: events of detached imgs don't reach the document.
@@ -124,7 +126,6 @@
     const first = firstStill(LARGE.has(m[2].toLowerCase()));
     const key = `${m[1]}|${first}`;
     const step = known.get(key);
-    if (step === -1) { show(img, marked(src)); return; }
     if (!listening.has(img)) {
       listening.add(img);
       img.addEventListener('load', onLoad);
@@ -135,27 +136,44 @@
         prune = Math.max(1000, owned.size * 2);
       }
     }
-    const next = { source: src, original: marked(src), id: m[1], steps: ladders[first], key, step: step ?? 0, frame: '', showing: 'frame', fit: img.style.objectFit };
+    const next = { source: src, original: marked(src), id: m[1], steps: ladders[first], key, step: Math.max(step ?? 0, 0), frame: '', showing: 'frame', fit: img.style.objectFit, failed: false };
     state.set(img, next);
-    setFrame(img, next);
+    if (step === -1) { next.failed = true; setOriginal(img, next); }
+    else setFrame(img, next);
   };
+  // CSS backgrounds (the masthead ad's player poster) can't take a still: the uploader's image,
+  // marked so the rule list lets it through.
+  const URLS = /url\((["']?)(.*?)\1\)/g;
+  const checkBackground = el => {
+    const bg = el.style.backgroundImage;
+    if (!bg || !bg.includes('ytimg.com/vi')) return;
+    const next = bg.replace(URLS, (all, q, url) => (THUMB.test(url) && !isMarked(url) ? `url("${marked(url)}")` : all));
+    if (next !== bg) el.style.backgroundImage = next;
+  };
+  const BACKGROUND = '[style*="ytimg.com/vi"]';
+  const pictureImgs = source => (source.parentElement?.tagName === 'PICTURE' ? source.parentElement.getElementsByTagName('img') : []);
 
   const scan = node => {
     if (node.nodeType !== 1) return;
     if (node.tagName === 'IMG') { check(node); return; }
-    if (node.firstElementChild) for (const img of node.getElementsByTagName('img')) check(img);
+    if (node.tagName === 'SOURCE') { for (const img of pictureImgs(node)) check(img); return; }
+    if (node.hasAttribute('style')) checkBackground(node);
+    if (!node.firstElementChild) return;
+    for (const img of node.getElementsByTagName('img')) check(img);
+    for (const el of node.querySelectorAll(BACKGROUND)) checkBackground(el);
   };
   const observer = new MutationObserver(records => {
     for (const r of records) {
       if (r.type === 'attributes') {
         const t = r.target;
-        if (t.tagName === 'IMG') check(t);
-        else if (t.tagName === 'SOURCE' && t.parentElement?.tagName === 'PICTURE') for (const img of t.parentElement.getElementsByTagName('img')) check(img);
+        if (r.attributeName === 'style') checkBackground(t);
+        else if (t.tagName === 'IMG') check(t);
+        else if (t.tagName === 'SOURCE') for (const img of pictureImgs(t)) check(img);
       }
       else for (const n of r.addedNodes) scan(n);
     }
   });
-  observer.observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'srcset'] });
+  observer.observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'srcset', 'style'] });
   if (document.documentElement) scan(document.documentElement);
 
   // One floating button, outside YouTube's components, over the hovered thumbnail.
@@ -176,7 +194,7 @@
     button.addEventListener('click', e => {
       e.preventDefault(); e.stopPropagation();
       const s = hovered && state.get(hovered);
-      if (!s) { hide(); return; }
+      if (!s || s.failed) { hide(); return; }
       if (s.showing === 'frame') setOriginal(hovered, s); else setFrame(hovered, s);
       button.textContent = s.showing === 'frame' ? 'Original' : 'Frame';
     });
@@ -196,7 +214,7 @@
     if (e.target === host) return;
     const box = e.target.closest?.(BOX);
     const img = box && (box.tagName === 'IMG' ? box : box.querySelector('img'));
-    if (img && state.has(img) && img !== hovered) place(img, box);
+    if (img && img !== hovered && state.get(img)?.failed === false) place(img, box);
   };
   // YouTube's hover preview covers the thumbnail, so leaving is judged by position, not target.
   const move = e => {
@@ -226,7 +244,10 @@
       host?.remove();
       for (const ref of owned) {
         const img = ref.deref();
-        const s = img && state.get(img);
+        if (!img) continue;
+        img.removeEventListener('load', onLoad);
+        img.removeEventListener('error', onError);
+        const s = state.get(img);
         if (s) restore(img, s);
       }
       owned.clear();

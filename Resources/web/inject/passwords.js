@@ -72,22 +72,25 @@
   // The form (or dialog, section…) around `el`, and whether it asks for a code.
   const askRoot = (el) => el.form || el.closest('[role="dialog"], dialog, main, section, article') || el.parentElement?.parentElement?.parentElement;
   const asks = (el) => ASKS.test((askRoot(el)?.textContent || '').slice(0, 4000));
-  // The one-digit boxes `el` is one of, in order: the nearest ancestor (up to four up) holding
-  // 4–8 of them, each numeric, marked one-time-code or named for a code; or unmarked boxes that
-  // are the only text entry in a form asking for a code.
+  // The one-digit boxes `el` is one of, in order, among the 4–8 in its nearest ancestor (up to
+  // four up): all of them when one is marked one-time-code (some sites mark only the first);
+  // else those that are numeric or named for a code, when there are 4 or more; else unmarked
+  // boxes that are the only text entry in a form asking for a code.
   const boxes = (el) => {
     if (el.maxLength !== 1 || !codeType(el)) return null;
-    let group = null;
-    for (let node = el.parentElement, up = 0; node && up < 4 && !group; node = node.parentElement, up++) {
-      const all = [...node.querySelectorAll('input')].filter((i) => codeType(i) && i.maxLength === 1 && visible(i));
-      if (all.length >= 4) group = all;
+    let all = null;
+    for (let node = el.parentElement, up = 0; node && up < 4 && !all; node = node.parentElement, up++) {
+      const found = [...node.querySelectorAll('input')].filter((i) => codeType(i) && i.maxLength === 1 && visible(i));
+      if (found.length >= 4) all = found;
     }
-    if (!group || group.length > 8 || !group.includes(el)) return null;
-    const names = group.map(describe);
+    if (!all || all.length > 8 || !all.includes(el)) return null;
+    const names = all.map(describe);
     if (names.some((d) => NOT_CODE.test(d))) return null;
-    if (group.every((b, i) => numeric(b) || hinted(b) || named(names[i]))) return group;
+    if (all.some(hinted)) return all;
+    const digits = all.filter((b, i) => numeric(b) || named(names[i]));
+    if (digits.length) return digits.length >= 4 && digits.includes(el) ? digits : null;
     const root = askRoot(el);
-    return root && asks(el) && inputs(root).every((i) => !codeType(i) || group.includes(i)) ? group : null;
+    return root && asks(el) && inputs(root).every((i) => !codeType(i) || all.includes(i)) ? all : null;
   };
   const isCode = (el) => {
     if (!codeType(el)) return false;
@@ -228,15 +231,15 @@
       } finally { filling = false; }
     },
   });
-  // A one-time code, one digit per box for split fields; false = the field is gone, or its boxes
-  // don't fit the code.
+  // A one-time code, one digit per box for split fields; false = the field is gone, its boxes
+  // don't fit the code, or the field is too short for it.
   Object.defineProperty(window, '__anglPasswordsFillCode', {
     value: (field, documentToken, origin, code) => {
       if (documentToken !== doc || origin !== location.origin) return false;
       const el = byToken.get(field)?.deref();
       if (!el || !visible(el) || !isCode(el)) return false;
       const split = boxes(el);
-      if (split && split.length !== code.length) return false;
+      if (split ? split.length !== code.length : el.maxLength > 0 && el.maxLength < code.length) return false;
       const into = split ? split.map((box, i) => [box, code[i]]) : [[el, code]];
       filling = true;
       try {
