@@ -38,6 +38,9 @@
   const state = new WeakMap(); // img → { source, original (marked), id, steps, key, step, frame, showing, fit }
   const known = new Map();   // `${id}|${first still}` → working step, or -1 when none loads
   const listening = new WeakSet();
+  // Every img ever taken over, weakly, so stop() also reaches cards YouTube has detached to reuse.
+  const owned = new Set();
+  let prune = 1000;
   let host = null, button = null, hovered = null, rect = null, moved = 0; // the hover button
 
   // Every URL the img may load: srcset and a <picture>'s sources win over src, and the browser
@@ -76,7 +79,6 @@
     show(img, s.original);
   };
   // Setting turned off: the uploader's image, unmarked so a later start takes it over again.
-  let stopped = false;
   const restore = (img, s) => {
     state.delete(img);
     img.style.objectFit = s.fit;
@@ -86,7 +88,6 @@
   const failed = img => {
     const s = state.get(img);
     if (!s || s.showing !== 'frame') return;
-    if (stopped) { restore(img, s); return; }
     if (++s.step < s.steps.length) { setFrame(img, s); return; }
     known.set(s.key, -1);
     setOriginal(img, s);
@@ -98,8 +99,7 @@
     const img = e.currentTarget;
     const s = state.get(img);
     if (!s || s.showing !== 'frame' || s.frame !== img.src) return;
-    if (stopped) restore(img, s);
-    else if (img.naturalWidth <= 120) failed(img);
+    if (img.naturalWidth <= 120) failed(img);
     else known.set(s.key, s.step);
   };
   const onError = e => {
@@ -129,6 +129,11 @@
       listening.add(img);
       img.addEventListener('load', onLoad);
       img.addEventListener('error', onError);
+      owned.add(new WeakRef(img));
+      if (owned.size >= prune) {
+        for (const ref of owned) if (!ref.deref()) owned.delete(ref);
+        prune = Math.max(1000, owned.size * 2);
+      }
     }
     const next = { source: src, original: marked(src), id: m[1], steps: ladders[first], key, step: step ?? 0, frame: '', showing: 'frame', fit: img.style.objectFit };
     state.set(img, next);
@@ -210,20 +215,21 @@
   addEventListener('blur', hide);
 
   window.anglYouTubeFrames = {
-    // Setting turned off (the rule list is already gone): put the originals back and let go.
-    // Detached imgs keep their state, so their own load/error listeners restore them.
+    // Setting turned off (the rule list is already gone): put the originals back and let go,
+    // in detached imgs too (YouTube reattaches recycled cards later, after the observer stops).
     stop() {
-      stopped = true;
       observer.disconnect();
       removeEventListener('pointerover', over, passive);
       removeEventListener('pointermove', move, passive);
       removeEventListener('scroll', scrolled, passive);
       removeEventListener('blur', hide);
       host?.remove();
-      for (const img of [...document.getElementsByTagName('img')]) {
-        const s = state.get(img);
+      for (const ref of owned) {
+        const img = ref.deref();
+        const s = img && state.get(img);
         if (s) restore(img, s);
       }
+      owned.clear();
       window.anglYouTubeFrames = undefined;
     },
   };
