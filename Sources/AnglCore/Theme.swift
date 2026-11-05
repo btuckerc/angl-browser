@@ -6,7 +6,10 @@ public struct Theme: Codable, Equatable, Sendable {
     public var appearance: Appearance = .dark
     public var radius: Double = 0
     public var font = Fonts()
+    /// The palette. In light appearance, `colorLight` is drawn instead: the built-in light palette
+    /// with the user's `color` keys and then their `colorLight` keys on top (see `layered(user:)`).
     public var color = Colors()
+    public var colorLight = Colors.light
     public var metrics = Metrics()
     public var sidebar = Sidebar()
     public var window = Window()
@@ -57,27 +60,42 @@ public struct Theme: Codable, Equatable, Sendable {
             return String(format: "#%02x%02x%02x", mix(a.r, b.r), mix(a.g, b.g), mix(a.b, b.b))
         }
 
+        /// `hex` moved toward `fg.primary` only as far as it takes to reach `ratio` against the base,
+        /// sidebar and raised backgrounds. A colour that already does, or doesn't parse, stays.
+        func lifted(_ hex: String, to ratio: Double) -> String {
+            guard let from = parseHexColor(hex), let to = parseHexColor(fg.primary) else { return hex }
+            let backgrounds = [bg.base, bg.sidebar, bg.raised]
+            for step in 0...20 {
+                let t = Double(step) / 20
+                func mix(_ x: Double, _ y: Double) -> Int { Int(((x * (1 - t) + y * t) * 255).rounded()) }
+                let candidate = String(format: "#%02x%02x%02x", mix(from.r, to.r), mix(from.g, to.g), mix(from.b, to.b))
+                if backgrounds.allSatisfy({ (contrastRatio(candidate, $0) ?? 0) >= ratio }) { return step == 0 ? hex : candidate }
+            }
+            return fg.primary
+        }
+
         /// The colours drawn while macOS Increase Contrast is on: muted text reaches 4.5:1 against every
-        /// background (WCAG AA), secondary text 7:1, hairlines 3:1, each moved toward `fg.primary` only as far
-        /// as that takes. Colours that already pass, or don't parse, stay.
+        /// background (WCAG AA), secondary text 7:1, hairlines 3:1.
         public var increasedContrast: Colors {
             var c = self
-            let backgrounds = [bg.base, bg.sidebar, bg.raised]
-            func strengthen(_ hex: String, to ratio: Double) -> String {
-                guard let from = parseHexColor(hex), let to = parseHexColor(fg.primary) else { return hex }
-                for step in 0...20 {
-                    let t = Double(step) / 20
-                    func mix(_ x: Double, _ y: Double) -> Int { Int(((x * (1 - t) + y * t) * 255).rounded()) }
-                    let candidate = String(format: "#%02x%02x%02x", mix(from.r, to.r), mix(from.g, to.g), mix(from.b, to.b))
-                    if backgrounds.allSatisfy({ (contrastRatio(candidate, $0) ?? 0) >= ratio }) { return step == 0 ? hex : candidate }
-                }
-                return fg.primary
-            }
-            c.fg.muted = strengthen(fg.muted, to: 4.5)
-            c.fg.secondary = strengthen(fg.secondary, to: 7)
-            c.border = strengthen(resolvedBorder, to: 3)
+            c.fg.muted = lifted(fg.muted, to: 4.5)
+            c.fg.secondary = lifted(fg.secondary, to: 7)
+            c.border = lifted(resolvedBorder, to: 3)
             return c
         }
+
+        /// The built-in light palette: every text colour reads at 4.5:1 or better on base, sidebar and raised.
+        public static let light: Colors = {
+            var c = Colors()
+            c.bg = Bg(base: "#fafaf9", sidebar: "#f0efed", raised: "#ffffff", selected: "#e2e1de")
+            c.fg = Fg(primary: "#1d1d1d", secondary: "#4a4946", muted: "#6b6a66")
+            c.accent = "#0e759a"
+            c.ok = "#3d7a17"
+            c.warn = "#876800"
+            c.danger = "#c0245d"
+            c.dangerStrong = "#a01d4d"
+            return c
+        }()
     }
 
     public struct Metrics: Codable, Equatable, Sendable {
@@ -155,8 +173,29 @@ public struct Theme: Codable, Equatable, Sendable {
         return t
     }
 
+    /// The theme as drawn in one appearance: `color` is that appearance's palette and `appearance`
+    /// says which (so `cssVariables` exports a definite `color-scheme`). In light, an accent under
+    /// 3:1 on the backgrounds — a white accent chosen for dark — is darkened until it reaches 3:1.
+    public func resolved(dark: Bool) -> Theme {
+        var t = self
+        t.appearance = dark ? .dark : .light
+        if !dark {
+            t.color = colorLight
+            t.color.accent = colorLight.lifted(colorLight.accent, to: 3)
+        }
+        return t
+    }
+
+    /// A partial user theme layered over the defaults. `color` keys apply to both appearances:
+    /// they're layered under the user's `colorLight`, which then goes over the light palette.
+    public static func layered(user: Any) throws -> Theme {
+        guard var u = user as? [String: Any], let shared = u["color"] else { return try JSONFile.layered(Theme(), user: user) }
+        u["colorLight"] = u["colorLight"].map { JSONFile.merge(shared, $0) } ?? shared
+        return try JSONFile.layered(Theme(), user: u)
+    }
+
     public static func load(from url: URL) throws -> Theme {
-        try JSONFile.layered(Theme(), file: url)
+        try JSONFile.user(at: url).map(layered(user:)) ?? Theme()
     }
 
     /// `:root { --bg-base: …; … }` for internal pages and user CSS.

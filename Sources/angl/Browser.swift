@@ -34,6 +34,8 @@ final class Browser {
     private(set) var problems: [String] = []
     private(set) var windows: [BrowserWindowController] = []
     private var watcher: ConfigWatcher?
+    private var appearanceObservation: NSKeyValueObservation?
+    private var applyingAppearance = false
     private var housekeeping: Timer?
     private var pendingSave: Timer?
     private var lastSnapshotSession: SessionState?
@@ -72,6 +74,9 @@ final class Browser {
         _ = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { Browser.shared.restyle() }
+        }
+        appearanceObservation = NSApp.observe(\.effectiveAppearance) { _, _ in
+            MainActor.assumeIsolated { Browser.shared.effectiveAppearanceChanged() }
         }
         Passwords.shared.start()
         web.start(settings: settings)
@@ -213,18 +218,38 @@ final class Browser {
         if !problems.isEmpty { frontWindow?.toast(problems.joined(separator: " · "), color: { $0.warn }) }
     }
 
-    /// The user's theme as drawn: with stronger text and hairlines while macOS Increase Contrast is on.
+    /// The user's theme as drawn: in the effective appearance (`system` follows macOS), with stronger
+    /// text and hairlines while macOS Increase Contrast is on.
     private static func style(for t: Theme) -> Style {
-        Style(NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast ? t.increasedContrast : t)
+        let dark = switch t.appearance {
+        case .dark: true
+        case .light: false
+        case .system: NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        }
+        let drawn = t.resolved(dark: dark)
+        return Style(NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast ? drawn.increasedContrast : drawn)
     }
 
     private func restyle() {
+        applyAppearance() // first: `system` reads the app's effective appearance
         style = Browser.style(for: theme)
-        applyAppearance()
+        post(.anglTheme)
+    }
+
+    /// macOS switched light/dark: only a `system` theme follows, and only when what it draws changes.
+    /// Ignored while angl sets `NSApp.appearance` itself: that fires this observer synchronously, before
+    /// `restyle` has stored the new style, and restyling from here would recurse.
+    private func effectiveAppearanceChanged() {
+        guard theme.appearance == .system, !applyingAppearance else { return }
+        let next = Browser.style(for: theme)
+        guard next.theme.appearance != style.theme.appearance else { return }
+        style = next
         post(.anglTheme)
     }
 
     private func applyAppearance() {
+        applyingAppearance = true
+        defer { applyingAppearance = false }
         switch theme.appearance {
         case .dark: NSApp.appearance = NSAppearance(named: .darkAqua)
         case .light: NSApp.appearance = NSAppearance(named: .aqua)
@@ -238,20 +263,20 @@ final class Browser {
 
     /// Write one settings value (dot path) into the user's partial settings.json.
     func setSetting(path: String, value: Any?) throws {
-        let s: Settings = try writeLayered(Settings(), file: paths.settingsFile, path: path, value: value, atomic: Settings.atomicPaths)
+        let s = try writeLayered(file: paths.settingsFile, path: path, value: value) { try JSONFile.layered(Settings(), user: $0, atomic: Settings.atomicPaths) }
         if s != settings { settings = s; post(.anglSettings) }
     }
 
     /// Write one theme token (dot path) into the user's partial theme.json.
     func setTheme(path: String, value: Any?) throws {
-        let t: Theme = try writeLayered(Theme(), file: paths.themeFile, path: path, value: value)
+        let t = try writeLayered(file: paths.themeFile, path: path, value: value, decode: Theme.layered(user:))
         if t != theme { theme = t; restyle() }
     }
 
-    /// Set `path` in a partial user JSON file, validating the merged result before writing so a
-    /// bad value never lands on disk. Returns the decoded merged value. A file that exists but
-    /// can't be read as a JSON object is left alone: rewriting it would drop every other override.
-    private func writeLayered<T: Codable>(_ defaults: T, file: URL, path: String, value: Any?, atomic: Set<String> = []) throws -> T {
+    /// Set `path` in a partial user JSON file, validating the decoded result (`decode` layers the
+    /// user object over the defaults) before writing so a bad value never lands on disk. A file that
+    /// exists but can't be read as a JSON object is left alone: rewriting it would drop every other override.
+    private func writeLayered<T>(file: URL, path: String, value: Any?, decode: (Any) throws -> T) throws -> T {
         var user: [String: Any] = [:]
         if FileManager.default.fileExists(atPath: file.path) {
             let existing = try Data(contentsOf: file)
@@ -264,9 +289,7 @@ final class Browser {
         }
         user = setPath(user, path.split(separator: ".").map(String.init), value)
         let data = try JSONSerialization.data(withJSONObject: user, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
-        let base = try JSONSerialization.jsonObject(with: JSONFile.encoder().encode(defaults))
-        let merged = try JSONSerialization.data(withJSONObject: JSONFile.merge(base, user, atomic: atomic))
-        let decoded = try JSONFile.decoder().decode(T.self, from: merged)
+        let decoded = try decode(user)
         try FileManager.default.createDirectory(at: paths.configDir, withIntermediateDirectories: true)
         try data.write(to: file, options: .atomic)
         return decoded

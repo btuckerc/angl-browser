@@ -130,4 +130,14 @@
   const listeners = {};
   window.onAnglEvent = (name, fn) => { (listeners[name] ||= []).push(fn); };
   window.anglEvent = (name, payload) => (listeners[name] || []).forEach((fn) => fn(payload));
+  // Sent when the theme or appearance changes: re-fetch angl://theme.css instead of reloading. The newest
+  // link is replaced and every older one dropped once it loads, so quick changes can't leave a stale sheet last.
+  window.onAnglEvent('theme', () => {
+    const links = document.querySelectorAll('link[href^="angl://theme.css"]');
+    if (!links.length) return;
+    const next = links[links.length - 1].cloneNode();
+    next.href = `angl://theme.css?${Date.now()}`;
+    next.onload = () => links.forEach((link) => link.remove());
+    links[links.length - 1].after(next);
+  });
 })();

@@ -39,13 +39,23 @@ public enum JSONFile {
         return out
     }
 
-    /// Decode `T` from a partial user file layered over `defaults`. Returns the defaults when
-    /// the file is missing; throws with a readable message when it is malformed.
-    public static func layered<T: Codable>(_ defaults: T, file: URL, atomic: Set<String> = []) throws -> T {
-        guard let data = try? Data(contentsOf: file), !data.isEmpty else { return defaults }
-        let user = try JSONSerialization.jsonObject(with: data)
+    /// The user file as a JSON value; nil when it is missing or empty. Throws when it is malformed.
+    public static func user(at file: URL) throws -> Any? {
+        guard let data = try? Data(contentsOf: file), !data.isEmpty else { return nil }
+        return try JSONSerialization.jsonObject(with: data)
+    }
+
+    /// Decode `T` from a partial user value layered over `defaults`.
+    public static func layered<T: Codable>(_ defaults: T, user: Any, atomic: Set<String> = []) throws -> T {
         let base = try JSONSerialization.jsonObject(with: encoder().encode(defaults))
         let merged = try JSONSerialization.data(withJSONObject: merge(base, user, atomic: atomic))
         return try decoder().decode(T.self, from: merged)
+    }
+
+    /// Decode `T` from a partial user file layered over `defaults`. Returns the defaults when
+    /// the file is missing; throws with a readable message when it is malformed.
+    public static func layered<T: Codable>(_ defaults: T, file: URL, atomic: Set<String> = []) throws -> T {
+        guard let user = try Self.user(at: file) else { return defaults }
+        return try layered(defaults, user: user, atomic: atomic)
     }
 }

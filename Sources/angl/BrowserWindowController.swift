@@ -133,7 +133,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
                 MainActor.assumeIsolated { if let self { f(self) } }
             })
         }
-        on(.anglTheme) { $0.applyStyle() }
+        on(.anglTheme) { $0.applyStyle(); $0.refreshPageThemes() }
         on(.anglSettings) { w in
             // Turning split view off hides the unfocused pane: its idle clock starts now.
             let splitView = w.browser.settings.tabs.splitView
@@ -1168,6 +1168,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         progressLine.fill = s.accent
         for (_, t) in tabs { t.webView?.underPageBackgroundColor = s.base }
         root.needsLayout = true
+    }
+
+    /// Open angl:// pages re-fetch angl://theme.css, so a theme or appearance change reaches them without a reload.
+    private func refreshPageThemes() {
+        for (_, t) in tabs where t.url?.scheme == InternalPages.scheme {
+            t.webView?.evaluateJavaScript("window.anglEvent?.('theme')")
+        }
     }
 
     private func configureOutline(fullScreen: Bool) {

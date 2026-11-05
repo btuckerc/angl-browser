@@ -1,5 +1,4 @@
 :root {
-  color-scheme: dark;
   font: 12px var(--font-ui, system-ui);
   color: var(--fg-primary, #deddda);
   background: var(--bg-base, #1d1d1d);

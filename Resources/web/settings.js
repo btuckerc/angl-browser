@@ -45,7 +45,7 @@ function write(ns, path, value, saved) {
   const call = () => {
     const next = typeof value === 'function' ? value(valueOf(ns, path)) : value;
     return angl.call(`${ns}.${next === undefined ? 'reset' : 'set'}`, next === undefined ? { path } : { path, value: next }).then((reply) => {
-      if (ns === 'theme') { state.theme = reply.theme; refreshThemeCSS(); } else state.settings = reply.settings;
+      if (ns === 'theme') state.theme = reply.theme; else state.settings = reply.settings;
       saved?.();
     });
   };
@@ -1114,16 +1114,6 @@ async function load() {
   } catch (error) {
     toast(error.message);
   }
-}
-
-// Re-fetch angl://theme.css so accent-derived colours (borders, outlines) update without a reload.
-function refreshThemeCSS() {
-  const old = document.querySelector('link[href^="angl://theme.css"]');
-  if (!old) return;
-  const next = old.cloneNode();
-  next.href = `angl://theme.css?${Date.now()}`;
-  next.onload = () => old.remove();
-  old.after(next);
 }
 
 bindChrome();
