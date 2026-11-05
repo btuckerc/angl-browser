@@ -301,7 +301,8 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     // MARK: Picture in Picture
 
-    enum PictureInPicture: String { case toggle, enter, exit, on, off, noVideo = "none" }
+    /// `already`: `enter` found a video in Picture in Picture already, so coming back to the tab leaves it there.
+    enum PictureInPicture: String { case toggle, enter, exit, on, off, already, noVideo = "none" }
 
     /// Set when switching away moved this tab's video to Picture in Picture; coming back ends it.
     var autoPictureInPicture = false
@@ -309,7 +310,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// angl's world, so the page's own overrides don't get in the way. `enter` takes only a playing video.
     private static let pictureInPictureScript = """
     if (document.pictureInPictureElement) {
-      if (mode === 'enter') return 'on';
+      if (mode === 'enter') return 'already';
       await document.exitPictureInPicture();
       return 'off';
     }
