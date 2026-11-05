@@ -1164,7 +1164,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         permissionBar.applyStyle(s)
         status.applyStyle(s)
         blank.applyStyle(s)
-        if !paletteMode { palette.closePalette() }
+        if !paletteMode, palette.isVisible { palette.closePalette() }
         progressLine.fill = s.accent
         for (_, t) in tabs { t.webView?.underPageBackgroundColor = s.base }
         root.needsLayout = true

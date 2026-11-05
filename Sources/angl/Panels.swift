@@ -283,6 +283,9 @@ final class FindBar: FlatView, NSTextFieldDelegate {
         field.placeholderString = "find in page"
         field.usesSingleLineMode = true
         for v: NSView in [field, result, prev, next, caseButton, close] { addSubview(v) }
+        prev.toolTip = "Previous match (⇧⌘G)"
+        next.toolTip = "Next match (⌘G)"
+        close.toolTip = "Close find (Esc)"
         prev.action = { [weak self] in self?.find(backwards: true) }
         next.action = { [weak self] in self?.find(backwards: false) }
         caseButton.text = "Aa"

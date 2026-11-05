@@ -28,6 +28,14 @@ final class ThemeTests: XCTestCase {
         // Still a hierarchy: muted stays dimmer than secondary, secondary than primary.
         XCTAssertLessThan(try XCTUnwrap(contrastRatio(hc.fg.muted, c.bg.base)), try XCTUnwrap(contrastRatio(hc.fg.secondary, c.bg.base)))
         XCTAssertLessThan(try XCTUnwrap(contrastRatio(hc.fg.secondary, c.bg.base)), try XCTUnwrap(contrastRatio(hc.fg.primary, c.bg.base)))
+        // A primary that can't carry the floors itself: the lift goes on toward white.
+        var dim = Theme.Colors()
+        dim.fg = .init(primary: "#8c8c8b", secondary: "#8c8c8b", muted: "#8c8c8b")
+        let hd = dim.increasedContrast
+        for bg in [dim.bg.base, dim.bg.sidebar, dim.bg.raised] {
+            XCTAssertGreaterThanOrEqual(try XCTUnwrap(contrastRatio(hd.fg.muted, bg)), 4.5)
+            XCTAssertGreaterThanOrEqual(try XCTUnwrap(contrastRatio(hd.fg.secondary, bg)), 7)
+        }
     }
 
     /// A light theme moves toward its own (dark) primary; tokens that already pass are left alone.

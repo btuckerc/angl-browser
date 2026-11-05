@@ -323,7 +323,7 @@ enum Suggestions {
             return recents ? recentTabs(w) : []
         case .command(let q):
             return Commands.palette(q, window: w).map { e in
-                Suggestion(kind: .command, title: e.title, detail: e.detail, hint: e.hint) { _ in e.run(w) }
+                Suggestion(kind: .command, title: e.title, detail: e.detail, hint: e.hint) { [weak w] _ in if let w { e.run(w) } }
             }
         case .filter(.tabs, let q):
             return tabMatches(q, w).map { tab($0, $1, w) }
@@ -338,7 +338,7 @@ enum Suggestions {
             let isAddress = Omnibox.urlIfAddress(typed) != nil
             var out = [Suggestion(kind: isAddress ? .go : .search, title: typed,
                                   detail: isAddress ? "" : "search · \(url.host() ?? "")", hint: "↩",
-                                  preconnect: isAddress ? nil : url) { d in w.go(url, disposition: d) }]
+                                  preconnect: isAddress ? nil : url) { [weak w] d in w?.go(url, disposition: d) }]
             var seen: Set<String> = [url.absoluteString]
             // An open tab stands for its page: the same URL doesn't come back as a bookmark or history row.
             for (n, ws) in tabMatches(typed, w).prefix(3) {
@@ -382,28 +382,29 @@ enum Suggestions {
     private static func tab(_ n: TabNode, _ ws: Workspace, _ w: BrowserWindowController) -> Suggestion {
         Suggestion(kind: .tab, title: n.title.isEmpty ? "New Tab" : n.title,
                    detail: n.url.map(Omnibox.display) ?? "", hint: "■",
-                   hintColor: w.style.workspaceColor(ws.color)) { _ in w.activate(w.tab(n)) }
+                   hintColor: w.style.workspaceColor(ws.color)) { [weak w] _ in if let w { w.activate(w.tab(n)) } }
     }
 
     private static func history(_ h: HistoryItem, _ w: BrowserWindowController) -> Suggestion {
         Suggestion(kind: .history, title: h.title.isEmpty ? h.url : h.title,
-                   detail: URL(string: h.url).map(Omnibox.display) ?? h.url, hint: "", preconnect: URL(string: h.url)) { d in
-            if let u = URL(string: h.url) { w.go(u, disposition: d) }
+                   detail: URL(string: h.url).map(Omnibox.display) ?? h.url, hint: "", preconnect: URL(string: h.url)) { [weak w] d in
+            if let u = URL(string: h.url) { w?.go(u, disposition: d) }
         }
     }
 
     private static func archive(_ record: RecoveryRecord, _ w: BrowserWindowController) -> Suggestion {
         Suggestion(kind: .archive, title: record.saved.title.isEmpty ? (record.saved.url ?? "New Tab") : record.saved.title,
-                   detail: record.saved.url.flatMap(URL.init(string:)).map(Omnibox.display) ?? "", hint: "↩") { _ in
-            guard w.restore(record) else { return }
+                   detail: record.saved.url.flatMap(URL.init(string:)).map(Omnibox.display) ?? "", hint: "↩") { [weak w] _ in
+            guard w?.restore(record) == true else { return }
             _ = Browser.shared.history?.deleteRecovery(id: record.id)
         }
     }
 
     private static func bookmark(_ bm: Bookmark, _ w: BrowserWindowController) -> Suggestion? {
         guard let s = bm.url, let u = URL(string: s) else { return nil }
-        return Suggestion(kind: .bookmark, title: bm.title, detail: Omnibox.display(u), hint: "", menu: { BookmarkMenu.make(bm, w) },
-                          preconnect: u) { d in w.go(u, disposition: d) }
+        return Suggestion(kind: .bookmark, title: bm.title, detail: Omnibox.display(u), hint: "",
+                          menu: { [weak w] in w.map { BookmarkMenu.make(bm, $0) } ?? NSMenu() },
+                          preconnect: u) { [weak w] d in w?.go(u, disposition: d) }
     }
 }
 
@@ -432,7 +433,7 @@ enum OmniboxEditing {
 @MainActor
 final class SuggestionsPanel {
     var onPick: ((Suggestion, NavBar.Disposition) -> Void)?
-    var style: Style?
+    var style: Style? { didSet { list.style = style; list.needsDisplay = true } }
     private var panel: NSPanel?
     private let list = SuggestionList()
     var items: [Suggestion] { list.items }

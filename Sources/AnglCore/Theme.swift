@@ -61,17 +61,24 @@ public struct Theme: Codable, Equatable, Sendable {
         }
 
         /// `hex` moved toward `fg.primary` only as far as it takes to reach `ratio` against the base,
-        /// sidebar and raised backgrounds. A colour that already does, or doesn't parse, stays.
+        /// sidebar and raised backgrounds; when even the primary falls short, toward white or black,
+        /// whichever reads better (and that extreme if nothing reaches). A colour that already passes, or doesn't parse, stays.
         func lifted(_ hex: String, to ratio: Double) -> String {
-            guard let from = parseHexColor(hex), let to = parseHexColor(fg.primary) else { return hex }
+            guard let from = parseHexColor(hex) else { return hex }
             let backgrounds = [bg.base, bg.sidebar, bg.raised]
-            for step in 0...20 {
-                let t = Double(step) / 20
-                func mix(_ x: Double, _ y: Double) -> Int { Int(((x * (1 - t) + y * t) * 255).rounded()) }
-                let candidate = String(format: "#%02x%02x%02x", mix(from.r, to.r), mix(from.g, to.g), mix(from.b, to.b))
-                if backgrounds.allSatisfy({ (contrastRatio(candidate, $0) ?? 0) >= ratio }) { return step == 0 ? hex : candidate }
+            func worst(_ c: String) -> Double { backgrounds.map { contrastRatio(c, $0) ?? 0 }.min() ?? 0 }
+            if worst(hex) >= ratio { return hex }
+            let extremes = ["#ffffff", "#000000"].sorted { worst($0) > worst($1) }
+            for end in [fg.primary] + extremes {
+                guard let to = parseHexColor(end) else { continue }
+                for step in 1...20 {
+                    let t = Double(step) / 20
+                    func mix(_ x: Double, _ y: Double) -> Int { Int(((x * (1 - t) + y * t) * 255).rounded()) }
+                    let candidate = String(format: "#%02x%02x%02x", mix(from.r, to.r), mix(from.g, to.g), mix(from.b, to.b))
+                    if worst(candidate) >= ratio { return candidate }
+                }
             }
-            return fg.primary
+            return extremes[0]
         }
 
         /// The colours drawn while macOS Increase Contrast is on: muted text reaches 4.5:1 against every
