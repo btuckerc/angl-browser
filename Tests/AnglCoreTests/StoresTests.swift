@@ -80,6 +80,19 @@ final class StoresTests: XCTestCase {
         XCTAssertEqual(store.suggest("youtube", limit: 0), [])
     }
 
+    /// `%` and `_` typed into the palette or History search match themselves, not any text.
+    func testSearchTreatsLikeWildcardsLiterally() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = try HistoryStore(url: url)
+        store.record(url: URL(string: "https://a_b.test/100%25")!, title: "", typed: false)
+        store.record(url: URL(string: "https://axb.test/100x25")!, title: "", typed: false)
+        XCTAssertEqual(store.suggest("a_b", limit: 5).map(\.url), ["https://a_b.test/100%25"])
+        XCTAssertEqual(store.query("a_b", limit: 5, offset: 0).map(\.url), ["https://a_b.test/100%25"])
+        XCTAssertEqual(store.query("100%", limit: 5, offset: 0).map(\.url), ["https://a_b.test/100%25"])
+        XCTAssertEqual(store.suggest("%", limit: 5).map(\.url), ["https://a_b.test/100%25"])
+    }
+
     func testRecoveryTableRoundTripsAndConsumesRecords() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".sqlite")
         defer { try? FileManager.default.removeItem(at: url) }

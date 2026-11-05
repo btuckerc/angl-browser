@@ -130,10 +130,20 @@ public final class HistoryStore: @unchecked Sendable {
         }
     }
 
+    /// A LIKE pattern matching `text` anywhere, literally: `%`, `_` and `\` are escaped (use with `ESCAPE '\'`).
+    static func likeContains<S: StringProtocol>(_ text: S) -> String {
+        var pattern = "%"
+        for c in text {
+            if c == "%" || c == "_" || c == "\\" { pattern.append("\\") }
+            pattern.append(c)
+        }
+        return pattern + "%"
+    }
+
     /// Searches every whitespace-separated term; ranked by frecency, or newest first when `recent`.
     public func query(_ text: String, limit: Int, offset: Int, recent: Bool = false) -> [HistoryItem] {
-        let terms = text.split(whereSeparator: { $0.isWhitespace }).map { "%\($0)%" }
-        let clauses = terms.map { _ in "(url LIKE ? COLLATE NOCASE OR title LIKE ? COLLATE NOCASE)" }
+        let terms = text.split(whereSeparator: { $0.isWhitespace }).map(Self.likeContains)
+        let clauses = terms.map { _ in #"(url LIKE ? ESCAPE '\' COLLATE NOCASE OR title LIKE ? ESCAPE '\' COLLATE NOCASE)"# }
         let whereClause = clauses.isEmpty ? "" : "WHERE " + clauses.joined(separator: " AND ")
         let order = recent ? "last_visit DESC" : "(visit_count+2*typed_count)/(1+MAX(0,(strftime('%s','now')-last_visit)/86400.0)) DESC,last_visit DESC"
         let sql = "SELECT url,title,last_visit,visit_count FROM visits \(whereClause) ORDER BY \(order) LIMIT ? OFFSET ?"
@@ -142,7 +152,8 @@ public final class HistoryStore: @unchecked Sendable {
 
     /// Suggests URL matches after ignoring scheme and www, then title matches.
     /// Ranked by (URL-prefix match, visits, frecency): keeps only the best `limit` rows instead of
-    /// materializing and sorting every substring match on each keystroke.
+    /// materializing and sorting every substring match on each keystroke, and builds Strings only for
+    /// rows that enter the best `limit`.
     public func suggest(_ prefix: String, limit: Int) -> [HistoryItem] {
         let limit = max(0, limit)
         guard limit > 0 else { return [] }
@@ -153,29 +164,56 @@ public final class HistoryStore: @unchecked Sendable {
             if value.hasPrefix("www.") { value.removeFirst(4) }
             return value.hasPrefix(needle)
         }
+        let needleBytes = Array(needle.utf8)
+        let asciiNeedle = needleBytes.allSatisfy { $0 >= 0x20 && $0 < 0x80 }
+        /// `matches` on the column's UTF-8 without allocating, or nil when a non-ASCII byte in the compared
+        /// span (or just after it, a possible combining mark) means Unicode lowercasing or grapheme
+        /// boundaries could decide; the caller then asks `matches`.
+        func quickMatches(_ p: UnsafePointer<UInt8>) -> Bool? {
+            guard asciiNeedle else { return nil }
+            func lower(_ b: UInt8) -> UInt8 { b >= 65 && b <= 90 ? b + 32 : b }
+            var start = 0, i = 0
+            while p[i] != 0 {
+                if p[i] == 58, p[i + 1] == 47, p[i + 2] == 47 { start = i + 3; break }
+                i += 1
+            }
+            // "www." (each test stops at the terminating NUL, which matches nothing)
+            if lower(p[start]) == 119, lower(p[start + 1]) == 119, lower(p[start + 2]) == 119, p[start + 3] == 46 { start += 4 }
+            for (j, b) in needleBytes.enumerated() {
+                let c = p[start + j]
+                if c >= 0x80 { return nil }
+                if lower(c) != b { return false }
+            }
+            return p[start + needleBytes.count] >= 0x80 ? nil : true
+        }
         return queue.sync {
             guard let db else { return [] }
             var statement: OpaquePointer?
-            let sql = "SELECT url,title,last_visit,visit_count FROM visits WHERE url LIKE ? OR title LIKE ? ORDER BY (visit_count+2*typed_count) DESC"
+            // No ORDER BY: sorting every match (all rows for a one-letter query) cost more than the scan.
+            // The weighted count is the last ranking key instead, with table order breaking ties.
+            let sql = #"SELECT url,title,last_visit,visit_count,visit_count+2*typed_count FROM visits WHERE url LIKE ? ESCAPE '\' OR title LIKE ? ESCAPE '\'"#
             guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
             defer { sqlite3_finalize(statement) }
-            bind(statement, values: ["%\(prefix)%", "%\(prefix)%"])
-            // Best rows so far, ordered: prefix matches first, then more visits, then SQL (frecency) order.
-            var best: [(match: Bool, item: HistoryItem)] = []
+            let pattern = Self.likeContains(prefix)
+            bind(statement, values: [pattern, pattern])
+            // Best rows so far, ordered: prefix matches first, then more visits, then the weighted count.
+            var best: [(match: Bool, weight: Int, item: HistoryItem)] = []
             best.reserveCapacity(limit + 1)
-            func ranksBelow(_ match: Bool, _ visits: Int, _ other: (match: Bool, item: HistoryItem)) -> Bool {
-                match == other.match ? visits <= other.item.visits : !match
+            func ranksBelow(_ match: Bool, _ visits: Int, _ weight: Int, _ other: (match: Bool, weight: Int, item: HistoryItem)) -> Bool {
+                if match != other.match { return !match }
+                return visits == other.item.visits ? weight <= other.weight : visits < other.item.visits
             }
             while sqlite3_step(statement) == SQLITE_ROW {
-                let url = String(cString: sqlite3_column_text(statement, 0))
+                guard let raw = sqlite3_column_text(statement, 0) else { continue }
                 let visits = Int(sqlite3_column_int(statement, 3))
-                let match = matches(url)
-                if best.count == limit, let last = best.last, ranksBelow(match, visits, last) { continue }
-                let item = HistoryItem(url: url, title: String(cString: sqlite3_column_text(statement, 1)),
+                let weight = Int(sqlite3_column_int64(statement, 4))
+                let match = quickMatches(raw) ?? matches(String(cString: raw))
+                if best.count == limit, let last = best.last, ranksBelow(match, visits, weight, last) { continue }
+                let item = HistoryItem(url: String(cString: raw), title: String(cString: sqlite3_column_text(statement, 1)),
                                        lastVisit: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2)), visits: visits)
                 // Later rows lose ties, so insert after every row that ranks at least as high.
-                let index = best.firstIndex { !ranksBelow(match, visits, $0) } ?? best.count
-                best.insert((match, item), at: index)
+                let index = best.firstIndex { !ranksBelow(match, visits, weight, $0) } ?? best.count
+                best.insert((match, weight, item), at: index)
                 if best.count > limit { best.removeLast() }
             }
             return best.map(\.item)
@@ -230,10 +268,11 @@ public final class HistoryStore: @unchecked Sendable {
         queue.sync {
             guard let db else { return [] }
             var statement: OpaquePointer?
-            let sql = "SELECT payload FROM recovery WHERE reason=? AND (url LIKE ? COLLATE NOCASE OR title LIKE ? COLLATE NOCASE) ORDER BY created_at DESC LIMIT ? OFFSET ?"
+            let sql = #"SELECT payload FROM recovery WHERE reason=? AND (url LIKE ? ESCAPE '\' COLLATE NOCASE OR title LIKE ? ESCAPE '\' COLLATE NOCASE) ORDER BY created_at DESC LIMIT ? OFFSET ?"#
             guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
             defer { sqlite3_finalize(statement) }
-            bind(statement, values: [reason.rawValue, "%\(text)%", "%\(text)%", max(0, limit), max(0, offset)])
+            let pattern = Self.likeContains(text)
+            bind(statement, values: [reason.rawValue, pattern, pattern, max(0, limit), max(0, offset)])
             var result: [RecoveryRecord] = []
             while sqlite3_step(statement) == SQLITE_ROW {
                 guard let bytes = sqlite3_column_blob(statement, 0) else { continue }
