@@ -318,10 +318,10 @@ extension Passwords {
             // Saved by now. A sync meanwhile is fine (the save asks for one); a lock or logout
             // keeps the passkey from the page, as for sign-in.
             guard epoch == bitwarden.epoch else {
-                toast("Bitwarden locked before the site got the passkey; it's saved, but the site may not know it", in: c.window, color: Browser.shared.style.warn)
+                toast("Bitwarden locked before the site got the passkey; it's saved, but the site may not know it", in: c.window, color: { $0.warn })
                 return Passkey.cancelled
             }
-            toast("Passkey saved to Bitwarden", in: c.window, color: Browser.shared.style.accent)
+            toast("Passkey saved to Bitwarden", in: c.window, color: { $0.accent })
             return Passkey.credential(credential)
         } catch {
             return failed(error, in: c)
@@ -330,7 +330,7 @@ extension Passwords {
 
     /// A ceremony the vault changed under: nothing was signed or saved.
     private func vaultMoved(in c: Passkey.Ceremony) -> [String: Any] {
-        toast("Bitwarden changed meanwhile: try again", in: c.window, color: Browser.shared.style.warn)
+        toast("Bitwarden changed meanwhile: try again", in: c.window, color: { $0.warn })
         return Passkey.cancelled
     }
 
@@ -347,7 +347,7 @@ extension Passwords {
     private func failed(_ error: Error, in c: Passkey.Ceremony) -> [String: Any] {
         let reply = Passkey.error(for: error)
         if reply["name"] as? String == "NotAllowedError" {
-            toast(String(error.localizedDescription.prefix(120)), in: c.window, color: Browser.shared.style.warn)
+            toast(String(error.localizedDescription.prefix(120)), in: c.window, color: { $0.warn })
         }
         return reply
     }

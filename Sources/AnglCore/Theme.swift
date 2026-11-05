@@ -46,7 +46,7 @@ public struct Theme: Codable, Equatable, Sendable {
         public struct Fg: Codable, Equatable, Sendable {
             public var primary = "#deddda"
             public var secondary = "#a3a29f"
-            public var muted = "#696969"
+            public var muted = "#8c8c8b"
         }
 
         /// The border colour actually drawn: "auto" (or anything unparsable) mixes 35% accent into the base background.

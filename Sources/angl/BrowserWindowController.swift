@@ -620,7 +620,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         if let url { t.navigate(url) }
         if t === active { attachActive() }
         let name = browser.workspaces.container(targetID)?.name ?? "container"
-        toast(id == nil ? "using Space default container (reloaded)" : "moved to \(name) (reloaded)", color: style.secondary)
+        toast(id == nil ? "using Space default container (reloaded)" : "moved to \(name) (reloaded)", color: { $0.secondary })
         sidebar.reload()
         navBar.update()
         browser.markSessionDirty()
@@ -791,7 +791,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         let nt = tab(node)
         if fresh { close(t, subtree: false) }
         switchWorkspace(id: ws.id, activating: nt)
-        toast("opened in \(ws.name)", color: style.workspaceColor(ws.color))
+        toast("opened in \(ws.name)", color: { $0.workspaceColor(ws.color) })
     }
 
     // MARK: Callbacks from tabs
@@ -811,7 +811,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         attachActive()
         status.show(nil, from: t)
         if let p = t.policy, !p.javascript, t.url?.scheme != InternalPages.scheme {
-            status.flash("JavaScript off", color: style.muted)
+            status.flash("JavaScript off", color: { $0.muted })
         }
     }
 
@@ -892,13 +892,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         wv.pageZoom = z
         if delta == nil { wv.magnification = 1 }
         browser.updateSite(url) { $0.zoom = abs(z - browser.settings.content.zoom) < 0.001 ? nil : z }
-        toast("\(Int((z * 100).rounded()))%", color: style.secondary)
+        toast("\(Int((z * 100).rounded()))%", color: { $0.secondary })
     }
 
     /// Change the current site's overrides and reload so the page picks them up.
     func changeSite(reload: Bool = true, _ change: (SitePolicy, inout SiteOverrides) -> Void) {
         guard let t = active, let url = t.url, url.scheme == "http" || url.scheme == "https" else {
-            toast("no site settings for this page", color: style.muted)
+            toast("no site settings for this page", color: { $0.muted })
             return
         }
         let p = browser.policy(for: url)
@@ -910,7 +910,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         if n.dark != p.dark { bits.append("dark \(n.dark.rawValue)") }
         if n.blocker != p.blocker { bits.append("blocker \(n.blocker ? "on" : "off")") }
         if n.blockRemoteFonts != p.blockRemoteFonts { bits.append("remote fonts \(n.blockRemoteFonts ? "blocked" : "allowed")") }
-        if !bits.isEmpty { toast(bits.joined(separator: " · "), color: style.secondary) }
+        if !bits.isEmpty { toast(bits.joined(separator: " · "), color: { $0.secondary }) }
         if reload { t.reload(fromOrigin: false) } else { t.invalidatePolicy() }
         navBar.update()
     }
@@ -918,7 +918,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     func showSitePanel() {
         if let p = sitePanel, p.isVisible { p.close(); return }
         guard let t = active, ["http", "https"].contains(t.url?.scheme) else {
-            toast("no site settings for this page", color: style.muted)
+            toast("no site settings for this page", color: { $0.muted })
             return
         }
         let panel = SitePanel(owner: self, tab: t)
@@ -954,12 +954,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         guard let t = active, let url = t.url else { return }
         var store = browser.bookmarks
         if store.flattened().contains(where: { $0.url == url.absoluteString }) {
-            toast("already bookmarked", color: style.muted)
+            toast("already bookmarked", color: { $0.muted })
             return
         }
         store.add(Bookmark(title: t.displayTitle, url: url.absoluteString), toFolderNamed: "Bookmarks")
         browser.setBookmarks(store)
-        toast("bookmarked", color: style.ok)
+        toast("bookmarked", color: { $0.ok })
     }
 
     func toggleFavorite(_ node: TabNode) {
@@ -980,19 +980,19 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         let clean = CleanURL.clean(url)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(clean.absoluteString, forType: .string)
-        toast("copied \(Omnibox.display(clean))", color: style.secondary)
+        toast("copied \(Omnibox.display(clean))", color: { $0.secondary })
     }
 
     func handoffActive(engine: Engine?) {
         guard let url = active?.url else { return }
         let last = UserDefaults.standard.string(forKey: "angl.lastEngine").flatMap(Engine.engine(id:))
         guard let e = engine ?? (last.flatMap { Handoff.appURL(for: $0) != nil ? $0 : nil }) ?? Handoff.installed.first else {
-            toast("no other browser installed", color: style.muted)
+            toast("no other browser installed", color: { $0.muted })
             return
         }
         UserDefaults.standard.set(e.id, forKey: "angl.lastEngine")
         Task { @MainActor in
-            if await Handoff.open(url, in: e) { toast("opened in \(e.name)", color: style.secondary) }
+            if await Handoff.open(url, in: e) { toast("opened in \(e.name)", color: { $0.secondary }) }
         }
     }
 
@@ -1024,7 +1024,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         sidebar.updatePaletteHeader()
     }
 
-    func toast(_ text: String, color: NSColor) {
+    func toast(_ text: String, color: @escaping StatusOverlay.Tint) {
         status.flash(text, color: color)
     }
 

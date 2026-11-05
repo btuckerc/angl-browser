@@ -210,7 +210,7 @@ final class Browser {
         let keys = Commands.overrides
         Commands.loadOverrides(paths)
         if keys != Commands.overrides { NSApp.mainMenu = Commands.buildMainMenu() }
-        if !problems.isEmpty { frontWindow?.toast(problems.joined(separator: " · "), color: style.warn) }
+        if !problems.isEmpty { frontWindow?.toast(problems.joined(separator: " · "), color: { $0.warn }) }
     }
 
     /// The user's theme as drawn: with stronger text and hairlines while macOS Increase Contrast is on.

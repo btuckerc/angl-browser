@@ -71,7 +71,7 @@ extension BrowserWindowController {
         pageFullscreen = state
         root.needsLayout = true
         root.layoutSubtreeIfNeeded()
-        toast("\(tab.url?.host() ?? "page") is full screen · Esc exits", color: style.secondary)
+        toast("\(tab.url?.host() ?? "page") is full screen · Esc exits", color: { $0.secondary })
         return true
     }
 

@@ -58,6 +58,16 @@ struct Style {
     private static var symbols: [String: NSImage?] = [:]
 }
 
+/// WCAG contrast of two drawn colours (1…21; alpha ignored).
+func contrast(_ a: NSColor, _ b: NSColor) -> Double {
+    func hex(_ color: NSColor) -> String {
+        guard let c = color.usingColorSpace(.sRGB) else { return "" }
+        func byte(_ v: CGFloat) -> Int { Int((min(max(v, 0), 1) * 255).rounded()) }
+        return String(format: "#%02x%02x%02x", byte(c.redComponent), byte(c.greenComponent), byte(c.blueComponent))
+    }
+    return contrastRatio(hex(a), hex(b)) ?? 21
+}
+
 /// A flat view with a solid background and optional hairlines. No layers tricks, no vibrancy.
 class FlatView: NSView {
     var fill: NSColor? { didSet { if fill != oldValue { needsDisplay = true } } }

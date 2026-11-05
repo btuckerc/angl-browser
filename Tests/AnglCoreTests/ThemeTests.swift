@@ -8,11 +8,15 @@ final class ThemeTests: XCTestCase {
         XCTAssertNil(contrastRatio("nope", "#ffffff"))
     }
 
-    /// The default muted grey is 3.1:1 on the base background; Increase Contrast lifts every token to
-    /// its floor on every background it's drawn over.
+    /// Default text reads at WCAG AA (4.5:1) on every background it's drawn over; Increase Contrast
+    /// lifts every token to its floor.
     func testIncreasedContrastLiftsDefaultsToTheirFloors() throws {
         let c = Theme.Colors()
-        XCTAssertLessThan(try XCTUnwrap(contrastRatio(c.fg.muted, c.bg.base)), 4.5)
+        for bg in [c.bg.base, c.bg.sidebar, c.bg.raised] {
+            for fg in [c.fg.primary, c.fg.secondary, c.fg.muted] {
+                XCTAssertGreaterThanOrEqual(try XCTUnwrap(contrastRatio(fg, bg)), 4.5, "\(fg) on \(bg)")
+            }
+        }
         let hc = c.increasedContrast
         for bg in [c.bg.base, c.bg.sidebar, c.bg.raised] {
             XCTAssertGreaterThanOrEqual(try XCTUnwrap(contrastRatio(hc.fg.muted, bg)), 4.5)

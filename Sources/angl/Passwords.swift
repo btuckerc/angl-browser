@@ -87,7 +87,7 @@ final class Passwords: NSObject {
     /// ⌘\ — offer logins for the page's focused (or first) sign-in field; falls back to the last
     /// field reported in this tab (sign-ins inside frames). Again while they're up: search the vault.
     func fillFocused(in tab: Tab) {
-        guard enabled else { tab.owner.toast("Passwords are off (Settings › Passwords)", color: Browser.shared.style.secondary); return }
+        guard enabled else { tab.owner.toast("Passwords are off (Settings › Passwords)", color: { $0.secondary }); return }
         if let picker, let t = target, t.tab === tab, isCurrent(t) {
             if canSearch { picker.searching ? picker.focusSearch() : beginSearch() }
             return
@@ -98,7 +98,7 @@ final class Passwords: NSObject {
                                                           arguments: [:], in: nil, contentWorld: Self.world)
             if found as? Bool == true { return }
             if var t = target, t.tab === tab { t.explicit = true; target = t; show(for: t) }
-            else { tab.owner.toast("No sign-in field on this page", color: Browser.shared.style.secondary) }
+            else { tab.owner.toast("No sign-in field on this page", color: { $0.secondary }) }
         }
     }
 
@@ -249,7 +249,7 @@ final class Passwords: NSObject {
     /// field marked one-time-code); ⌘\ always.
     private func showCodes(for t: Target, keep: Bool) {
         guard useBitwarden else {
-            if t.explicit { t.tab?.owner.toast("One-time codes come from Bitwarden (Settings › Passwords)", color: Browser.shared.style.secondary) }
+            if t.explicit { t.tab?.owner.toast("One-time codes come from Bitwarden (Settings › Passwords)", color: { $0.secondary }) }
             return closePicker()
         }
         var rows = accountRows, footer: [Row] = [], arm = t.explicit
@@ -510,7 +510,7 @@ final class Passwords: NSObject {
             guard revision == bitwarden.settledRevision else { return vaultMoved(t) }
             if t.kind == .code {
                 guard let code = c.totp else {
-                    t.tab?.owner.toast("“\(login.title)” has no one-time code", color: Browser.shared.style.warn)
+                    t.tab?.owner.toast("“\(login.title)” has no one-time code", color: { $0.warn })
                     return
                 }
                 guard try await put(code: code, into: t), revision == bitwarden.settledRevision else { return }
@@ -530,7 +530,7 @@ final class Passwords: NSObject {
 
     /// A pick that the vault changed under (a sync, lock or logout): nothing was filled.
     private func vaultMoved(_ t: Target) {
-        t.tab?.owner.toast("Bitwarden changed meanwhile: choose the login again", color: Browser.shared.style.warn)
+        t.tab?.owner.toast("Bitwarden changed meanwhile: choose the login again", color: { $0.warn })
     }
 
     /// Fills the field's form; passwords.js re-checks the document and origin first. nil = the
@@ -541,7 +541,7 @@ final class Passwords: NSObject {
             "return window.__anglPasswordsFill(field, documentToken, origin, username, password)",
             arguments: ["field": t.field, "documentToken": t.document, "origin": t.origin, "username": username, "password": password],
             in: t.frame, contentWorld: Self.world)
-        guard let filled = result as? [String: Any] else { t.tab?.owner.toast("The sign-in field is gone", color: Browser.shared.style.warn); return nil }
+        guard let filled = result as? [String: Any] else { t.tab?.owner.toast("The sign-in field is gone", color: { $0.warn }); return nil }
         return (filled["username"] as? Bool ?? false, filled["password"] as? Bool ?? false)
     }
 
@@ -553,7 +553,7 @@ final class Passwords: NSObject {
             "return window.__anglPasswordsFillCode(field, documentToken, origin, code)",
             arguments: ["field": t.field, "documentToken": t.document, "origin": t.origin, "code": code],
             in: t.frame, contentWorld: Self.world)
-        guard result as? Bool == true else { t.tab?.owner.toast("Couldn't fill the code field", color: Browser.shared.style.warn); return false }
+        guard result as? Bool == true else { t.tab?.owner.toast("Couldn't fill the code field", color: { $0.warn }); return false }
         return true
     }
 
@@ -567,7 +567,7 @@ final class Passwords: NSObject {
         pb.setData(Data(), forType: concealed)
         pb.setData(Data(), forType: transient)
         let count = pb.changeCount
-        tab?.owner.toast("One-time code copied · clears in 30 s", color: Browser.shared.style.accent)
+        tab?.owner.toast("One-time code copied · clears in 30 s", color: { $0.accent })
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(30))
             if pb.changeCount == count { pb.clearContents() }
@@ -607,7 +607,7 @@ final class Passwords: NSObject {
             if let editor = user.currentEditor(), editor.responds(to: action) {
                 editor.perform(action, with: nil)
             } else {
-                self?.toast("The Passwords picker isn't available here; type or paste the login", in: window, color: Browser.shared.style.warn)
+                self?.toast("The Passwords picker isn't available here; type or paste the login", in: window, color: { $0.warn })
             }
         }
         let username = user.stringValue, password = Sheet.take(pw)
@@ -776,7 +776,7 @@ final class Passwords: NSObject {
     private func advance(_ step: Bitwarden.Step, in window: NSWindow, then t: Target?) async {
         switch step {
         case .done:
-            toast("Bitwarden: \(bitwarden.account?.email ?? "logged in")", in: window, color: Browser.shared.style.accent)
+            toast("Bitwarden: \(bitwarden.account?.email ?? "logged in")", in: window, color: { $0.accent })
             unlocked(then: t, remember: true)
         case .twoFactor(let attempt): await twoStep(attempt, in: window, then: t)
         case .newDevice(let attempt): await newDevice(attempt, in: window, then: t)
@@ -853,10 +853,10 @@ final class Passwords: NSObject {
         if error is CancellationError { return }
         closePicker()
         (target?.tab?.owner ?? (NSApp.keyWindow?.windowController as? BrowserWindowController))?
-            .toast(String(error.localizedDescription.prefix(120)), color: Browser.shared.style.warn)
+            .toast(String(error.localizedDescription.prefix(120)), color: { $0.warn })
     }
 
-    func toast(_ text: String, in window: NSWindow, color: NSColor = Browser.shared.style.secondary) {
+    func toast(_ text: String, in window: NSWindow, color: @escaping StatusOverlay.Tint = { $0.secondary }) {
         (window.windowController as? BrowserWindowController)?.toast(text, color: color)
     }
 

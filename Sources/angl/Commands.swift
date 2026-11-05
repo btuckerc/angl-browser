@@ -112,7 +112,7 @@ enum Commands {
             Command("snapshot.take", "Take Snapshot", .file, "cmd+shift+s") { w in
                 if Browser.shared.takeSnapshot(auto: false) != nil {
                     Browser.shared.post(.anglSnapshots)
-                    w?.toast("snapshot saved", color: Browser.shared.style.ok)
+                    w?.toast("snapshot saved", color: { $0.ok })
                 }
             },
             Command("bookmark.add", "Bookmark Page", .file, "cmd+d") { $0?.bookmarkActive() },
@@ -188,7 +188,7 @@ enum Commands {
 
             Command("blocker.update", "Update Block Lists", .none, needsWindow: false) { w in
                 Browser.shared.web.blocker.update(settings: Browser.shared.settings)
-                w?.toast("updating block lists…", color: Browser.shared.style.secondary)
+                w?.toast("updating block lists…", color: { $0.secondary })
             },
             Command("app.defaultBrowser", "Make angl the Default Browser", .none, needsWindow: false) { w in
                 Task { @MainActor in
@@ -196,9 +196,9 @@ enum Commands {
                         for scheme in ["http", "https"] {
                             try await NSWorkspace.shared.setDefaultApplication(at: Bundle.main.bundleURL, toOpenURLsWithScheme: scheme)
                         }
-                        w?.toast("angl is the default browser", color: Browser.shared.style.ok)
+                        w?.toast("angl is the default browser", color: { $0.ok })
                     } catch {
-                        w?.toast(error.localizedDescription, color: Browser.shared.style.danger)
+                        w?.toast(error.localizedDescription, color: { $0.danger })
                     }
                 }
             },
@@ -220,9 +220,9 @@ enum Commands {
         Task { @MainActor in
             do {
                 let (n, folder) = try await Importing.run(source, window: w)
-                w?.toast("imported \(n) into \(folder)", color: Browser.shared.style.ok)
+                w?.toast("imported \(n) into \(folder)", color: { $0.ok })
             } catch {
-                w?.toast((error as? PageCommands.Failure)?.message ?? error.localizedDescription, color: Browser.shared.style.danger)
+                w?.toast((error as? PageCommands.Failure)?.message ?? error.localizedDescription, color: { $0.danger })
             }
         }
     }

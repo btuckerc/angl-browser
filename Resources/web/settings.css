@@ -81,7 +81,7 @@ body.settings-page {
 }
 
 .searchbar #search::placeholder {
-  color: var(--fg-muted, #696969);
+  color: var(--fg-muted, #8c8c8b);
 }
 
 .searchbar kbd {
@@ -89,7 +89,7 @@ body.settings-page {
   width: 36px;
   text-align: center;
   font: 11px var(--mono);
-  color: var(--fg-muted, #696969);
+  color: var(--fg-muted, #8c8c8b);
   pointer-events: none;
 }
 
@@ -139,7 +139,7 @@ body.settings-page {
 }
 
 .settings-page .rail a.dim {
-  color: var(--fg-muted, #696969);
+  color: var(--fg-muted, #8c8c8b);
 }
 
 .settings-page .rail .count {
@@ -329,7 +329,7 @@ body.settings-page {
 
 .settings-page .context-tag {
   font-size: 11px;
-  color: var(--fg-muted, #696969);
+  color: var(--fg-muted, #8c8c8b);
   font-style: italic;
 }
 
@@ -430,7 +430,7 @@ body.settings-page {
   min-width: 32px;
   height: 32px;
   padding: 3px;
-  border: 1px solid var(--fg-muted, #696969);
+  border: 1px solid var(--fg-muted, #8c8c8b);
   border-radius: var(--small-radius);
   background: transparent;
   cursor: pointer;
@@ -538,7 +538,7 @@ body.settings-page {
 
 .settings-page .more-count {
   font-size: 11px;
-  color: var(--fg-muted, #696969);
+  color: var(--fg-muted, #8c8c8b);
 }
 
 /* Rows inside a disclosure indent under its chevron. */
@@ -607,7 +607,7 @@ body.settings-page {
 }
 
 .settings-page .row-menu button:disabled {
-  color: var(--fg-muted, #696969);
+  color: var(--fg-muted, #8c8c8b);
   cursor: default;
 }
 
@@ -737,13 +737,5 @@ body.settings-page {
 
   .settings-page .kind-switch details.row-options {
     grid-column: 3;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .settings-page .switch-track,
-  .settings-page .switch-thumb,
-  .settings-page details.row-options > summary {
-    transition: none;
   }
 }

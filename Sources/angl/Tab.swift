@@ -338,9 +338,9 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func togglePictureInPicture() {
         autoPictureInPicture = false
-        let owner = owner, muted = browser.style.muted
+        let owner = owner
         Task {
-            if await pictureInPicture(.toggle) == .noVideo { owner.toast("no video on this page", color: muted) }
+            if await pictureInPicture(.toggle) == .noVideo { owner.toast("no video on this page", color: { $0.muted }) }
         }
     }
 
@@ -430,7 +430,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
             if let rule = Engine.rule(for: url, in: browser.settings.engines.rules), let engine = Engine.engine(id: rule.engine),
                Handoff.appURL(for: engine) != nil {
                 _ = await Handoff.open(url, in: engine)
-                owner.toast("opened in \(engine.name)", color: browser.style.secondary)
+                owner.toast("opened in \(engine.name)", color: { $0.secondary })
                 if webView.backForwardList.currentItem == nil { owner.close(self, subtree: false) }
                 return (.cancel, preferences)
             }
@@ -582,7 +582,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
             crashReloadedAt = Date()
             webView.reload()
         } else {
-            owner.toast("page crashed (⌘R reloads)", color: owner.style.muted)
+            owner.toast("page crashed (⌘R reloads)", color: { $0.muted })
         }
     }
 

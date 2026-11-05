@@ -98,16 +98,17 @@ final class BlankView: FlatView {
 
 /// Bottom-left overlay: hovered link (mono, middle-truncated) or a short coloured toast.
 final class StatusOverlay: FlatView {
+    /// A toast's colour, resolved against the current style so a restyle recolours it.
+    typealias Tint = @MainActor (Style) -> NSColor
     private let text = NSTextField(labelWithString: "")
     private var hover: String?
-    private var toast: (String, NSColor)?
+    private var toast: (text: String, tint: Tint)?
     private var toastTimer: Timer?
     private var style: Style?
     private var area = NSRect.zero
 
     init() {
         super.init(frame: .zero)
-        text.lineBreakMode = .byTruncatingMiddle
         addSubview(text)
         isHidden = true
     }
@@ -130,10 +131,11 @@ final class StatusOverlay: FlatView {
         render()
     }
 
-    func flash(_ message: String, color: NSColor) {
+    /// Shows `message` until the next toast or for 1.8–5 s, longer for longer messages.
+    func flash(_ message: String, color: @escaping Tint) {
         toast = (message, color)
         toastTimer?.invalidate()
-        toastTimer = Timer.scheduledTimer(withTimeInterval: 1.8, repeats: false) { [weak self] _ in
+        toastTimer = Timer.scheduledTimer(withTimeInterval: min(5, 1.8 + 0.04 * Double(message.count)), repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.toast = nil; self?.render() }
         }
         render()
@@ -150,13 +152,26 @@ final class StatusOverlay: FlatView {
 
     private func render() {
         guard let s = style else { return }
-        let (msg, color): (String?, NSColor) = toast.map { ($0.0, $0.1) } ?? (hover, s.secondary)
+        let msg: String?, color: NSColor, maxWidth: CGFloat
+        if let toast {
+            // Toast text stays readable (4.5:1 on the overlay) whatever colour the caller or theme picked.
+            let tint = toast.tint(s)
+            msg = toast.text
+            color = contrast(tint, s.base) >= 4.5 ? tint : s.secondary
+            text.lineBreakMode = .byTruncatingTail
+            maxWidth = area.width
+        } else {
+            msg = hover
+            color = s.secondary
+            text.lineBreakMode = .byTruncatingMiddle
+            maxWidth = area.width * 0.6
+        }
         guard let msg, !msg.isEmpty else { isHidden = true; return }
         isHidden = false
         text.stringValue = msg
         text.textColor = color
         // cellSize includes the label's text padding; intrinsicContentSize doesn't, which clipped short toasts.
-        let w = min(ceil(text.cell?.cellSize.width ?? text.intrinsicContentSize.width) + 16, area.width * 0.6)
+        let w = min(ceil(text.cell?.cellSize.width ?? text.intrinsicContentSize.width) + 16, maxWidth)
         frame = NSRect(x: area.minX, y: area.maxY - 20, width: w, height: 20)
         let th = ceil(text.intrinsicContentSize.height)
         text.frame = NSRect(x: 8, y: (20 - th) / 2 + 1, width: w - 16, height: th)
@@ -463,7 +478,7 @@ final class SitePanel: NSPanel, NSWindowDelegate {
             guard let self else { return }
             Task { @MainActor in
                 await Browser.shared.web.clearSiteData(host: host, in: self.siteTab.container)
-                self.owner.toast("cleared \(host) data in \(self.siteTab.container.name)", color: self.style.danger)
+                self.owner.toast("cleared \(host) data in \(self.siteTab.container.name)", color: { $0.danger })
                 self.siteTab.reload(fromOrigin: true)
             }
             self.close()

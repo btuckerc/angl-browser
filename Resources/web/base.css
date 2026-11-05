@@ -211,7 +211,7 @@ section {
   width: 16px;
   height: 16px;
   padding: 0;
-  border: 1px solid var(--fg-muted, #696969);
+  border: 1px solid var(--fg-muted, #8c8c8b);
   border-radius: var(--radius, 0);
   cursor: pointer;
 }
@@ -226,7 +226,7 @@ section {
   align-items: center;
   gap: 4px;
   padding: 1px 6px 1px 2px;
-  border: 1px solid var(--fg-muted, #696969);
+  border: 1px solid var(--fg-muted, #8c8c8b);
   color: var(--fg-secondary, #a3a29f);
   font-size: 12px;
   cursor: pointer;
@@ -376,7 +376,7 @@ td input {
 
 small,
 .muted {
-  color: var(--fg-muted, #696969);
+  color: var(--fg-muted, #8c8c8b);
 }
 
 @media (max-width: 700px) {
