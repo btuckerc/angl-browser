@@ -598,6 +598,18 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
         owner.close(self, subtree: false)
     }
 
+    /// WebKit SPI: the Picture in Picture window's return button. WebKit puts the video back only
+    /// once its page is visible, so bring the tab, its window and angl forward.
+    @objc(_webViewFullscreenMayReturnToInline:)
+    func webViewFullscreenMayReturnToInline(_ webView: WKWebView) {
+        autoPictureInPicture = false
+        if webView.window == nil { owner.activate(self) }
+        guard let window = owner.window else { return }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate()
+    }
+
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo) async {
         _ = await panel(message, frame: frame, buttons: ["OK"])
