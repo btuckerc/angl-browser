@@ -73,8 +73,10 @@ ticket. Tags are `vVERSION` and match `VERSION`.
 - **No URL bar** by default: **⌘T** floats an address box over the page (a new tab opens
   only when you commit), **⌘L** or a click on the sidebar's address pill edits the current
   URL, **⌘K** opens it with `>` for commands (`>js off`, `>dark force`, `>profile work`,
-  `>open safari`, `>container work`, `>space 2`). Return opens here, ⌘Return as a child
-  tab, ⇧Return in a new window. An empty tab holds the same field in the page, next to the
+  `>open safari`, `>container work`, `>space 2`); a bare `>` lists every command. Return opens
+  here, ⌘Return as a child tab, ⇧Return in a new window. Lists longer than eight rows scroll,
+  and ↑ ↓ reach every match; an open tab hides the same page's history and bookmark rows. An
+  empty tab holds the same field in the page, next to the
   `angl` wordmark, with a blinking accent block for a caret; Esc clears it, then lets go.
   Appearance › Empty tab › Wordmark only turns that off, and Empty-tab caret › System keeps
   the field with the system caret (`"window": {"newTab": "mark"}`, `{"caret": "native"}`).

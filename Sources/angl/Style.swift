@@ -150,6 +150,12 @@ final class GlyphButton: NSView {
     override func accessibilityPerformPress() -> Bool { action?(); return true }
 }
 
+/// VoiceOver's handle on one hand-drawn row (palette suggestions, login picker); "press" picks it.
+final class PressableElement: NSAccessibilityElement {
+    var press: () -> Bool = { false }
+    override func accessibilityPerformPress() -> Bool { press() }
+}
+
 extension NSImage {
     func tinted(_ color: NSColor) -> NSImage {
         let img = NSImage(size: size, flipped: false) { rect in

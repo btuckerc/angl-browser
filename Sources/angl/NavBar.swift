@@ -292,11 +292,28 @@ struct Suggestion {
         case .command: "chevron.right"
         }
     }
+
+    /// What VoiceOver reads for the row: title, address, kind, and a command's shortcut.
+    var accessibilityLabel: String {
+        let kindName = switch kind {
+        case .go: "go to address"
+        case .search: "search"
+        case .tab: "open tab"
+        case .history: "history"
+        case .bookmark: "bookmark"
+        case .archive: "archived tab"
+        case .command: "command"
+        }
+        return [title, detail, kindName, kind == .command ? hint : ""].filter { !$0.isEmpty }.joined(separator: ", ")
+    }
 }
 
 @MainActor
 enum Suggestions {
+    /// The mixed list under a typed address or search.
     static let limit = 8
+    /// A filter (`h `, `b `, `a `) lists this many; the list scrolls past `SuggestionList.visible`.
+    static let filterLimit = 50
 
     static func compute(_ text: String, window w: BrowserWindowController) -> [Suggestion] {
         let b = Browser.shared!
@@ -304,17 +321,17 @@ enum Suggestions {
         case .empty:
             return []
         case .command(let q):
-            return Commands.palette(q, window: w).prefix(limit).map { e in
+            return Commands.palette(q, window: w).map { e in
                 Suggestion(kind: .command, title: e.title, detail: e.detail, hint: e.hint) { _ in e.run(w) }
             }
         case .filter(.tabs, let q):
-            return Array(tabs(q, w).prefix(limit))
+            return tabMatches(q, w).map { tab($0, $1, w) }
         case .filter(.history, let q):
-            return (b.history?.query(q, limit: limit, offset: 0) ?? []).map { history($0, w) }
+            return (b.history?.query(q, limit: filterLimit, offset: 0) ?? []).map { history($0, w) }
         case .filter(.bookmarks, let q):
-            return b.bookmarks.search(q, limit: limit).compactMap { bookmark($0, w) }
+            return b.bookmarks.search(q, limit: filterLimit).compactMap { bookmark($0, w) }
         case .filter(.archive, let q):
-            return (b.history?.recovery(reason: .archived, text: q, limit: limit) ?? []).map { archive($0, w) }
+            return (b.history?.recovery(reason: .archived, text: q, limit: filterLimit) ?? []).map { archive($0, w) }
         case .navigate(let url):
             let typed = text.trimmingCharacters(in: .whitespaces)
             let isAddress = Omnibox.urlIfAddress(typed) != nil
@@ -322,7 +339,11 @@ enum Suggestions {
                                   detail: isAddress ? "" : "search · \(url.host() ?? "")", hint: "↩",
                                   preconnect: isAddress ? nil : url) { d in w.go(url, disposition: d) }]
             var seen: Set<String> = [url.absoluteString]
-            for s in tabs(typed, w).prefix(3) { out.append(s) }
+            // An open tab stands for its page: the same URL doesn't come back as a bookmark or history row.
+            for (n, ws) in tabMatches(typed, w).prefix(3) {
+                out.append(tab(n, ws, w))
+                if let u = n.url { seen.insert(u.absoluteString) }
+            }
             for bm in b.bookmarks.search(typed, limit: 3) where seen.insert(bm.url ?? "").inserted {
                 if let s = bookmark(bm, w) { out.append(s) }
             }
@@ -337,20 +358,24 @@ enum Suggestions {
         }
     }
 
-    private static func tabs(_ q: String, _ w: BrowserWindowController) -> [Suggestion] {
+    private static func tabMatches(_ q: String, _ w: BrowserWindowController) -> [(TabNode, Workspace)] {
         let terms = q.lowercased().split(separator: " ").map(String.init)
-        var out: [Suggestion] = []
+        var out: [(TabNode, Workspace)] = []
         for ws in Browser.shared.workspaces.workspaces {
             guard let tr = w.trees[ws.id] else { continue }
             for n in tr.allTabs {
                 let hay = (n.title + " " + (n.url?.absoluteString ?? "")).lowercased()
                 guard terms.allSatisfy({ hay.contains($0) }), n !== w.active?.node else { continue }
-                out.append(Suggestion(kind: .tab, title: n.title.isEmpty ? "New Tab" : n.title,
-                                      detail: n.url.map(Omnibox.display) ?? "", hint: "■",
-                                      hintColor: w.style.workspaceColor(ws.color)) { _ in w.activate(w.tab(n)) })
+                out.append((n, ws))
             }
         }
         return out
+    }
+
+    private static func tab(_ n: TabNode, _ ws: Workspace, _ w: BrowserWindowController) -> Suggestion {
+        Suggestion(kind: .tab, title: n.title.isEmpty ? "New Tab" : n.title,
+                   detail: n.url.map(Omnibox.display) ?? "", hint: "■",
+                   hintColor: w.style.workspaceColor(ws.color)) { _ in w.activate(w.tab(n)) }
     }
 
     private static func history(_ h: HistoryItem, _ w: BrowserWindowController) -> Suggestion {
@@ -403,21 +428,17 @@ final class SuggestionsPanel {
     var style: Style?
     private var panel: NSPanel?
     private let list = SuggestionList()
-    private(set) var items: [Suggestion] = []
-    private(set) var index = 0
+    var items: [Suggestion] { list.items }
 
     var isVisible: Bool { panel?.isVisible ?? false }
-    var selected: Suggestion? { isVisible && items.indices.contains(index) ? items[index] : nil }
+    var selected: Suggestion? { isVisible ? list.current : nil }
 
     func show(_ items: [Suggestion], below rect: NSRect, parent: NSWindow?) {
-        self.items = items
-        index = 0
         let p = panel ?? makePanel()
-        let h = CGFloat(items.count) * SuggestionList.rowHeight + 2
+        let h = SuggestionList.height(for: items.count)
         p.setFrame(NSRect(x: rect.minX, y: rect.minY - h + 1, width: rect.width, height: h), display: false)
         list.style = style
         list.items = items
-        list.selected = 0
         list.onPick = { [weak self] i in
             guard let self, self.items.indices.contains(i) else { return }
             let flags = NSApp.currentEvent?.modifierFlags ?? []
@@ -429,9 +450,8 @@ final class SuggestionsPanel {
     }
 
     func move(_ delta: Int) {
-        guard isVisible, !items.isEmpty else { return }
-        index = (index + delta + items.count) % items.count
-        list.selected = index
+        guard isVisible else { return }
+        list.move(delta)
     }
 
     func hide() {
@@ -453,27 +473,95 @@ final class SuggestionsPanel {
     }
 }
 
-/// Rows drawn by hand: glyph, title, mono detail, hint.
+/// Rows drawn by hand: glyph, title, mono detail, hint. At most `visible` rows show; the rest scroll
+/// (wheel, or following the selection). The list owns the selection, so the row under the mouse, the
+/// row ↑ ↓ reach and the row Return picks are the same one.
 final class SuggestionList: NSView {
     static let rowHeight: CGFloat = 28
+    static let visible = 8
     var style: Style?
-    var items: [Suggestion] = [] { didSet { needsDisplay = true } }
-    var selected = 0 { didSet { needsDisplay = true } }
+    var items: [Suggestion] = [] {
+        didSet {
+            top = 0; wheel = 0; selected = 0; needsDisplay = true
+            // Rebuilt when an AX client next asks, not on every keystroke.
+            if axRows != nil { axRows = nil; NSAccessibility.post(element: self, notification: .layoutChanged) }
+        }
+    }
+    var selected = 0 {
+        didSet {
+            guard selected != oldValue else { return }
+            reveal()
+            needsDisplay = true
+            guard let axRows else { return }
+            for (i, e) in axRows.enumerated() { e.setAccessibilitySelected(i == selected) }
+            NSAccessibility.post(element: self, notification: .selectedChildrenChanged)
+        }
+    }
     var onPick: ((Int) -> Void)?
+    var current: Suggestion? { items.indices.contains(selected) ? items[selected] : nil }
+    /// The first row on screen.
+    private var top = 0
+    /// Scroll-wheel travel not yet worth a whole row.
+    private var wheel: CGFloat = 0
+    /// VoiceOver sees one element per row; kept here because AX doesn't retain them. Nil until asked for.
+    private var axRows: [PressableElement]?
+
+    /// The list's height for `count` rows: the visible ones plus the 1 pt border.
+    static func height(for count: Int) -> CGFloat { CGFloat(min(count, visible)) * rowHeight + 2 }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.list)
+        setAccessibilityLabel("Suggestions")
+    }
+    required init?(coder: NSCoder) { fatalError() }
 
     override var isFlipped: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// ↑ ↓ from the field, wrapping at the ends. VoiceOver stays in the field, so the row is read out.
+    func move(_ delta: Int) {
+        guard !items.isEmpty else { return }
+        selected = (selected + delta + items.count) % items.count
+        if NSWorkspace.shared.isVoiceOverEnabled, let item = current {
+            NSAccessibility.post(element: self, notification: .announcementRequested,
+                                 userInfo: [.announcement: item.accessibilityLabel,
+                                            .priority: NSAccessibilityPriorityLevel.high.rawValue])
+        }
+    }
+
+    private func reveal() {
+        if selected < top { top = selected } else if selected >= top + Self.visible { top = selected - Self.visible + 1 }
+        layoutAccessibility()
+    }
+
+    private func rowRect(_ i: Int) -> NSRect {
+        NSRect(x: 1, y: 1 + CGFloat(i - top) * Self.rowHeight, width: bounds.width - 2, height: Self.rowHeight)
+    }
 
     override func updateTrackingAreas() {
         trackingAreas.forEach(removeTrackingArea)
         addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseMoved, .activeAlways, .inVisibleRect], owner: self))
     }
 
-    private func row(at p: NSPoint) -> Int { Int((p.y - 1) / SuggestionList.rowHeight) }
+    private func row(at p: NSPoint) -> Int { top + Int((p.y - 1) / SuggestionList.rowHeight) }
 
     override func mouseMoved(with event: NSEvent) {
         let r = row(at: convert(event.locationInWindow, from: nil))
         if items.indices.contains(r) { selected = r }
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard items.count > Self.visible else { return }
+        wheel += event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * Self.rowHeight
+        let steps = Int(wheel / Self.rowHeight)
+        guard steps != 0 else { return }
+        wheel -= CGFloat(steps) * Self.rowHeight
+        top = min(max(0, top - steps), items.count - Self.visible)
+        layoutAccessibility()
+        needsDisplay = true
+        mouseMoved(with: event)
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -488,12 +576,49 @@ final class SuggestionList: NSView {
         return make()
     }
 
+    override func accessibilityChildren() -> [Any]? {
+        if let axRows { return axRows }
+        let rows = items.enumerated().map { i, item in
+            let e = PressableElement()
+            e.setAccessibilityElement(true)
+            e.setAccessibilityRole(.row)
+            e.setAccessibilityLabel(item.accessibilityLabel)
+            e.setAccessibilityParent(self)
+            e.setAccessibilitySelected(i == selected)
+            e.press = { [weak self] in
+                guard let self, self.items.indices.contains(i) else { return false }
+                self.selected = i
+                self.onPick?(i)
+                return true
+            }
+            return e
+        }
+        axRows = rows
+        layoutAccessibility()
+        return rows
+    }
+
+    /// AX parent space is bottom-up even for a flipped view: without the flip VoiceOver's cursor lands on
+    /// the mirrored row.
+    private func layoutAccessibility() {
+        for (i, e) in (axRows ?? []).enumerated() {
+            var r = rowRect(i)
+            r.origin.y = bounds.height - r.maxY
+            e.setAccessibilityFrameInParentSpace(r)
+        }
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        layoutAccessibility()
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         guard let s = style else { return }
         s.raised.setFill(); bounds.fill()
-        for (i, item) in items.enumerated() {
-            let y = 1 + CGFloat(i) * SuggestionList.rowHeight
-            let r = NSRect(x: 1, y: y, width: bounds.width - 2, height: SuggestionList.rowHeight)
+        for i in items.indices.clamped(to: top..<(top + Self.visible)) {
+            let item = items[i]
+            let r = rowRect(i), y = r.minY
             if i == selected {
                 s.selected.setFill(); r.fill()
                 s.accent.setFill(); NSRect(x: 1, y: y, width: 2, height: r.height).fill()
@@ -524,6 +649,12 @@ final class SuggestionList: NSView {
                 (item.detail as NSString).draw(in: NSRect(x: dx, y: y + (r.height - dh) / 2, width: max(0, avail - titleW - 10), height: dh),
                                                withAttributes: dAttrs)
             }
+        }
+        // More rows than fit: a thumb on the right edge says where the view is.
+        if items.count > Self.visible {
+            let track = bounds.height - 2, n = CGFloat(items.count)
+            s.border.setFill()
+            NSRect(x: bounds.width - 4, y: 1 + track * CGFloat(top) / n, width: 2, height: track * CGFloat(Self.visible) / n).fill()
         }
         s.border.setStroke()
         let path = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))

@@ -1154,12 +1154,6 @@ private final class PasswordPicker: NSPanel, NSTextFieldDelegate {
     }
 }
 
-/// VoiceOver's handle on one picker row; "press" picks it.
-private final class PickerRowElement: NSAccessibilityElement {
-    var press: () -> Bool = { false }
-    override func accessibilityPerformPress() -> Bool { press() }
-}
-
 /// The picker's rows: an optional search band, the scrolling rows (wheel, trackpad, or following
 /// the keyboard selection), then pinned footer rows below a hairline.
 @MainActor
@@ -1198,7 +1192,7 @@ private final class PickerList: NSView {
     /// Under the mouse: highlighted, but not armed.
     private var hovered: Int? { didSet { if hovered != oldValue { needsDisplay = true } } }
     /// VoiceOver sees one element per row; kept here because AX doesn't retain them.
-    private var axRows: [PickerRowElement] = []
+    private var axRows: [PressableElement] = []
     private var badges: [String: NSImage] = [:]
 
     var armed: Bool { selected != nil }
@@ -1329,7 +1323,7 @@ private final class PickerList: NSView {
 
     private func rebuildAccessibility() {
         axRows = rows.enumerated().map { index, row in
-            let e = PickerRowElement()
+            let e = PressableElement()
             e.setAccessibilityElement(true)
             e.setAccessibilityRole(row.selectable ? .row : .staticText)
             e.setAccessibilityLabel(row.accessibilityLabel)

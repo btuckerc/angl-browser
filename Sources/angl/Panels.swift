@@ -78,7 +78,7 @@ final class BlankView: FlatView {
         let markW = ceil(("angl" as NSString).size(withAttributes: [.font: owner.style.monoLarge]).width)
         let gap = ceil(("  " as NSString).size(withAttributes: [.font: owner.style.monoLarge]).width)
         let width = max(120, min(640, bounds.width - 64 - markW - gap))
-        let longest = band + CGFloat(Suggestions.limit) * SuggestionList.rowHeight + 2
+        let longest = band + SuggestionList.height(for: SuggestionList.visible)
         let top = max(8, min(bounds.midY - 60 - band / 2, bounds.height - longest - 8)).rounded()
         let x = ((bounds.width - markW - gap - width) / 2).rounded()
         dock.frame = NSRect(x: x + markW + gap, y: top, width: width, height: dock.height)

@@ -245,7 +245,7 @@ enum Commands {
         let verb = words.first ?? ""
         let arg = words.dropFirst().joined(separator: " ")
         func onOff(_ name: String, _ title: String, _ change: @escaping (Bool, inout SiteOverrides) -> Void) {
-            guard name.hasPrefix(verb) || verb.hasPrefix(name) else { return }
+            guard !verb.isEmpty, name.hasPrefix(verb) || verb.hasPrefix(name) else { return }
             for v in ["on", "off"] where arg.isEmpty || v.hasPrefix(arg) {
                 out.append(Entry(title: "\(title) \(v)", detail: "this site", hint: "") { w in
                     w?.changeSite { _, o in change(v == "on", &o) }
@@ -256,7 +256,7 @@ enum Commands {
         onOff("square", "Square corners") { on, o in o.square = on }
         onOff("blocker", "Blocker") { on, o in o.blocker = on }
         onOff("fonts", "Remote fonts") { on, o in o.blockRemoteFonts = !on }
-        if "dark".hasPrefix(verb) || verb == "dark" {
+        if !verb.isEmpty, "dark".hasPrefix(verb) || verb == "dark" {
             for m in DarkMode.allCases where arg.isEmpty || m.rawValue.hasPrefix(arg) {
                 out.append(Entry(title: "Dark \(m.rawValue)", detail: "this site", hint: "") { w in
                     w?.changeSite { _, o in o.dark = m }
@@ -292,10 +292,17 @@ enum Commands {
                 })
             }
         }
-        for c in all where c.menu != .none || true {
+        // Commands bound to two chords (Next Tab: ⌃⇥ and ⌘⇧]) show as one row with both.
+        var row: [String: Int] = [:]
+        for c in all {
             let hay = (c.title + " " + c.id.replacingOccurrences(of: ".", with: " ")).lowercased()
             guard q.isEmpty || words.allSatisfy({ hay.contains($0) }) else { continue }
             if c.needsWindow && window == nil { continue }
+            if let i = row[c.title] {
+                out[i].hint = [out[i].hint, c.chordLabel].filter { !$0.isEmpty }.joined(separator: " ")
+                continue
+            }
+            row[c.title] = out.count
             out.append(Entry(title: c.title, detail: "", hint: c.chordLabel) { w in c.run(w) })
         }
         return out

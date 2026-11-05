@@ -9,8 +9,6 @@ final class PaletteView: FlatView, NSTextFieldDelegate {
     let docked: Bool
     let field = URLTextField()
     private let list = SuggestionList()
-    private var items: [Suggestion] = []
-    private var selected = 0
     private(set) var tabChooser = false
     /// Commits open a new tab (⌘T, an empty Space) rather than navigating the current one.
     var newTab = false
@@ -22,7 +20,7 @@ final class PaletteView: FlatView, NSTextFieldDelegate {
 
     /// Height of the input row; the text is centred in it whether or not suggestions follow.
     static let fieldBand: CGFloat = 44
-    var height: CGFloat { Self.fieldBand + CGFloat(items.count) * SuggestionList.rowHeight + 2 }
+    var height: CGFloat { Self.fieldBand + SuggestionList.height(for: list.items.count) }
     var editing: Bool { field.currentEditor() != nil }
 
     init(owner: BrowserWindowController, docked: Bool) {
@@ -35,6 +33,7 @@ final class PaletteView: FlatView, NSTextFieldDelegate {
         field.isBordered = false; field.drawsBackground = false; field.focusRingType = .none
         field.usesSingleLineMode = true; field.cell?.isScrollable = true; field.cell?.wraps = false
         field.placeholderString = "search or address (> for commands)"; field.delegate = self
+        field.setAccessibilityLabel("Address, search or command")
         addSubview(field); addSubview(list)
         list.onPick = { [weak self] i in self?.commitSuggestion(i) }
         if docked {
@@ -61,10 +60,16 @@ final class PaletteView: FlatView, NSTextFieldDelegate {
         refresh()
     }
 
-    /// Keyboard into the field with its text selected, so typing replaces a prefilled address.
+    /// Keyboard into the field. A prefilled address is selected, so typing replaces it; a `>` prefill
+    /// (⌘K) keeps the caret after it, so typing stays in command mode.
     func focus() {
         window?.makeFirstResponder(field)
-        field.currentEditor()?.selectAll(nil)
+        selectPrefill()
+    }
+
+    func selectPrefill() {
+        guard let editor = field.currentEditor() else { return }
+        if field.stringValue == ">" { editor.selectedRange = NSRange(location: 1, length: 0) } else { editor.selectAll(nil) }
     }
 
     private func chooserItems(_ query: String) -> [Suggestion] {
@@ -81,7 +86,7 @@ final class PaletteView: FlatView, NSTextFieldDelegate {
                 self?.owner.split(with: node)
             }
         }
-        return Array(nodes.prefix(12))
+        return nodes
     }
 
     /// After a commit: the panel goes away; the docked field empties and stays where it is.
@@ -96,7 +101,7 @@ final class PaletteView: FlatView, NSTextFieldDelegate {
         let fh = ceil(font.ascender - font.descender + font.leading) + 2
         field.frame = NSRect(x: 16, y: 1 + ((Self.fieldBand - fh) / 2).rounded(), width: bounds.width - 32, height: fh)
         list.frame = NSRect(x: 1, y: 1 + Self.fieldBand, width: bounds.width - 2, height: max(0, bounds.height - Self.fieldBand - 2))
-        list.isHidden = items.isEmpty
+        list.isHidden = list.items.isEmpty
         caret?.update()
     }
 
@@ -106,10 +111,9 @@ final class PaletteView: FlatView, NSTextFieldDelegate {
     func controlTextDidEndEditing(_ obj: Notification) { if docked { focusChanged() } }
 
     private func refresh() {
-        items = tabChooser ? chooserItems(field.stringValue) : Suggestions.compute(field.stringValue, window: owner)
-        selected = 0
-        list.style = owner.style; list.items = items; list.selected = selected
-        if !tabChooser { owner.preconnect(items.first?.preconnect, newTab: newTab) }
+        list.style = owner.style
+        list.items = tabChooser ? chooserItems(field.stringValue) : Suggestions.compute(field.stringValue, window: owner)
+        if !tabChooser { owner.preconnect(list.current?.preconnect, newTab: newTab) }
         onResize()
         needsLayout = true
     }
@@ -127,14 +131,12 @@ final class PaletteView: FlatView, NSTextFieldDelegate {
     func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         switch selector {
         case #selector(NSResponder.moveDown(_:)), #selector(NSResponder.moveUp(_:)):
-            guard !items.isEmpty else { return true }
-            selected = (selected + (selector == #selector(NSResponder.moveDown(_:)) ? 1 : -1) + items.count) % items.count
-            list.selected = selected
-            if !tabChooser { owner.preconnect(items[selected].preconnect, newTab: newTab) }
+            list.move(selector == #selector(NSResponder.moveDown(_:)) ? 1 : -1)
+            if !tabChooser, let s = list.current { owner.preconnect(s.preconnect, newTab: newTab) }
             return true
         case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)):
-            if items.indices.contains(selected) {
-                if tabChooser { items[selected].act(.current) } else { run(items[selected], disposition()) }
+            if let s = list.current {
+                if tabChooser { s.act(.current) } else { run(s, disposition()) }
             } else if !tabChooser {
                 OmniboxEditing.commit(field.stringValue, window: owner, disposition: disposition(), close: close)
             }
@@ -154,8 +156,8 @@ final class PaletteView: FlatView, NSTextFieldDelegate {
     }
 
     private func commitSuggestion(_ i: Int) {
-        if items.indices.contains(i) {
-            if tabChooser { items[i].act(.current) } else { run(items[i], disposition()) }
+        if list.items.indices.contains(i) {
+            if tabChooser { list.items[i].act(.current) } else { run(list.items[i], disposition()) }
         }
     }
 
@@ -197,7 +199,7 @@ final class PalettePanel: NSPanel {
     func show(prefill: String?, newTab: Bool) {
         view.load(prefill: prefill, newTab: newTab)
         present()
-        view.field.currentEditor()?.selectAll(nil)
+        view.selectPrefill()
     }
 
     func showTabChooser() {
@@ -451,9 +453,12 @@ final class SidebarPaletteHeader: FlatView, NSGestureRecognizerDelegate {
         square.fill = o.style.workspaceColor(o.active?.container.color ?? o.workspace.color)
         site.image = o.style.symbol("gearshape", size: o.style.glyph - 3)
         let text = o.active?.url.map(Omnibox.display) ?? ""
-        let a = NSMutableAttributedString(string: text, attributes: [.font:o.style.monoSmall,.foregroundColor:o.style.secondary])
+        // One line, cut with an ellipsis: without the paragraph style the label word-wraps at "/" and the
+        // second line is clipped away ("angl://downloads" showed as "angl://").
+        let para = NSMutableParagraphStyle(); para.lineBreakMode = .byTruncatingTail
+        let a = NSMutableAttributedString(string: text, attributes: [.font:o.style.monoSmall,.foregroundColor:o.style.secondary,.paragraphStyle:para])
         if let host = o.active?.url?.host(), let range = text.range(of: host) { a.addAttribute(.foregroundColor, value:o.style.primary, range:NSRange(range,in:text)) }
-        if url.attributedStringValue != a { url.attributedStringValue = a; url.lineBreakMode = .byTruncatingTail; needsLayout = true }
+        if url.attributedStringValue != a { url.attributedStringValue = a; needsLayout = true }
         let web = o.active?.url.map { $0.scheme == "http" || $0.scheme == "https" } ?? false
         site.isEnabled = web
         site.tint = (o.active?.url.map { !Browser.shared.policy(for: $0).javascript } ?? false) && web ? o.style.warn : o.style.secondary
