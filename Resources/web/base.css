@@ -8,6 +8,18 @@
   --mono: var(--font-mono, "SF Mono", ui-monospace, monospace);
 }
 
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -386,5 +398,13 @@ small,
 
   main {
     padding: 18px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
   }
 }

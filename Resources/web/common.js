@@ -114,12 +114,18 @@
   };
   window.fmtDate = (value) => value ? new Date(value).toLocaleString() : '—';
   window.fmtBytes = (value) => value < 1024 ? `${value} B` : `${(value / 1024).toFixed(1)} KB`;
+  // The visible toast toggles display:none, which drops it from the accessibility tree; announce through a
+  // live region that exists before its text changes.
+  const announcer = window.el('div', { class: 'visually-hidden', role: 'status', 'aria-live': 'polite' });
+  document.body.append(announcer);
   window.toast = (message) => {
     let element = document.querySelector('.toast');
-    if (!element) { element = window.el('div', { class: 'toast' }); document.body.append(element); }
+    if (!element) { element = window.el('div', { class: 'toast', 'aria-hidden': 'true' }); document.body.append(element); }
+    element.setAttribute('aria-hidden', 'true');
     element.textContent = message;
     element.style.display = 'block';
-    setTimeout(() => { element.style.display = 'none'; }, 3000);
+    announcer.textContent = message;
+    setTimeout(() => { element.style.display = 'none'; announcer.textContent = ''; }, 3000);
   };
   const listeners = {};
   window.onAnglEvent = (name, fn) => { (listeners[name] ||= []).push(fn); };

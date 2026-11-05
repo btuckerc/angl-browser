@@ -1,6 +1,7 @@
 // Spaces and containers editor
 let data;
 let saveTimer;
+let controlID = 0;
 const palette = ['#55c3e8', '#a6e25f', '#ffdf6b', '#ff8eaf', '#e85b92', '#deddda', '#39545b'];
 
 function save() {
@@ -37,7 +38,12 @@ function colorPicker(value, colors, onChange) {
 }
 
 function line(label, ...controls) {
-  return el('div', { class: 'row' }, el('label', {}, label), ...controls);
+  const id = `space-control-${++controlID}`;
+  const labelable = controls.filter((control) => control.matches?.('input, select, textarea'));
+  const caption = el('label', labelable[0] ? { for: id } : {}, label);
+  if (labelable[0]) labelable[0].id = id;
+  labelable.slice(1).forEach((control) => { if (!control.hasAttribute('aria-label')) control.setAttribute('aria-label', control.placeholder || label); });
+  return el('div', { class: 'row' }, caption, ...controls);
 }
 
 function render() {
@@ -58,7 +64,9 @@ function render() {
     workspace.rules.forEach((rule, index) => {
       const kind = el('select', {}, ...['contains', 'host', 'prefix', 'regex'].map((value) => el('option', { value, selected: value === rule.kind }, value)));
       kind.addEventListener('change', () => { rule.kind = kind.value; save(); });
-      panel.append(line('Open here when URL', kind, textInput(rule.value, (value) => { rule.value = value; }),
+      const pattern = textInput(rule.value, (value) => { rule.value = value; });
+      pattern.setAttribute('aria-label', 'URL pattern');
+      panel.append(line('Open here when URL', kind, pattern,
         el('button', { onclick: () => { workspace.rules.splice(index, 1); render(); save(); } }, 'Remove')));
     });
     panel.append(line('', el('button', { onclick: () => { workspace.rules.push({ kind: 'host', value: '' }); render(); save(); } }, 'Add URL rule')));
@@ -83,8 +91,10 @@ function render() {
     if (container.proxy) {
       const host = textInput(container.proxy.host, (value) => { container.proxy.host = value; });
       host.placeholder = 'host';
+      host.setAttribute('aria-label', 'Proxy host');
       const port = textInput(container.proxy.port, (value) => { container.proxy.port = value; }, 'number');
       port.placeholder = 'port';
+      port.setAttribute('aria-label', 'Proxy port');
       proxy.push(host, port);
     }
     panel.append(

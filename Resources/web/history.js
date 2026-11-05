@@ -60,7 +60,7 @@ function mutate(tr, button, call) {
 }
 
 function historyRow(item, date, grouped) {
-  const forget = el('button', { title: 'Forget this page' }, '×');
+  const forget = el('button', { title: 'Forget this page', 'aria-label': `Forget ${item.title || item.url}` }, '×');
   const tr = el('tr', {},
     dateCell(date, grouped),
     pageCell(item.title, item.url),
@@ -73,7 +73,7 @@ function historyRow(item, date, grouped) {
 
 function recoveryRow(item, date, grouped, reason) {
   const restore = el('button', {}, 'Restore');
-  const remove = el('button', { title: 'Delete this record' }, '×');
+  const remove = el('button', { title: 'Delete this record', 'aria-label': `Delete ${item.saved.title || item.saved.url}` }, '×');
   const tr = el('tr', {},
     dateCell(date, grouped),
     pageCell(item.saved.title, item.saved.url),

@@ -11,11 +11,15 @@ function act(label, cmd, id, cls) {
 async function load() {
   try {
     const { items } = await angl.call('snapshots.list', {});
-    document.querySelector('tbody').replaceChildren(...items.map((s) => el('tr', {},
+    const body = document.querySelector('tbody');
+    body.replaceChildren(...items.map((s) => el('tr', {},
       el('td', {}, fmtDate(s.date)),
       el('td', {}, `${plural(s.windows, 'window')} · ${plural(s.workspaces, 'Space')} · ${plural(s.tabs, 'tab')}`),
       el('td', { class: 'muted' }, s.auto ? 'auto' : 'manual'),
       el('td', {}, el('div', { class: 'actions end' }, act('Open', 'snapshots.open', s.id), act('Export…', 'snapshots.export', s.id), act('Delete', 'snapshots.delete', s.id, 'danger'))))));
+    const empty = document.querySelector('#empty');
+    empty.textContent = 'No snapshots yet.';
+    empty.hidden = items.length > 0;
   } catch (e) {
     toast(e.message);
   }

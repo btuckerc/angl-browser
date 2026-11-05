@@ -11,11 +11,12 @@
   <body>
     <main>
       <h1>Site overrides</h1>
-      <input id="filter" placeholder="Filter sites…">
+      <label class="visually-hidden" for="filter">Filter sites</label><input id="filter" placeholder="Filter sites…">
       <table>
         <thead><tr><th>Host</th><th>JavaScript</th><th>Blocker</th><th>Remote fonts</th><th>Square</th><th>Dark</th><th>Hardening</th><th>Zoom</th><th>Volume dB</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
+      <p class="muted" id="empty" hidden></p>
     </main>
     <div class="toast"></div>
   </body>

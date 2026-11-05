@@ -10,9 +10,11 @@ function triState(value, change) {
 
 function render() {
   const body = document.querySelector('tbody');
+  const empty = document.querySelector('#empty');
   const query = document.querySelector('#filter').value.toLowerCase();
+  const matches = sites.filter((site) => site.host.toLowerCase().includes(query));
   body.replaceChildren();
-  sites.filter((site) => site.host.toLowerCase().includes(query)).forEach((site) => {
+  matches.forEach((site) => {
     const row = el('tr', {}, el('td', { class: 'mono' }, site.host));
     ['javascript', 'blocker', 'blockRemoteFonts', 'square'].forEach((key) => {
       const cell = el('td');
@@ -45,6 +47,8 @@ function render() {
     row.append(el('td', {}, el('button', { onclick: () => angl.call('sites.reset', { host: site.host }).then(load).catch((error) => toast(error.message)) }, 'Reset')));
     body.append(row);
   });
+  empty.textContent = sites.length ? 'No sites match.' : 'No site settings yet.';
+  empty.hidden = matches.length > 0;
 }
 
 function save(site) {

@@ -198,9 +198,10 @@ ticket. Tags are `vVERSION` and match `VERSION`.
 - **Keyboard and VoiceOver**: ⇧⌘E puts the keyboard in the tab tree, where an accent outline
   marks the row the arrow keys are on. VoiceOver reads and presses the sidebar buttons, the
   address pill, Space squares, pinned tabs, favourites and palette rows, hears toasts, and
-  names the window after its page. With macOS Increase Contrast on, muted text, secondary
+  names the window after its page. On angl:// pages every field and icon button has a name
+  and page toasts are announced. With macOS Increase Contrast on, muted text, secondary
   text and hairlines are raised to 4.5:1, 7:1 and 3:1 against the theme's backgrounds (chrome
-  and angl:// pages); Reduce Motion stops the sidebar peek sliding.
+  and angl:// pages); Reduce Motion stops the sidebar peek sliding and page transitions.
 - **Window outline** (Appearance): none (default) leaves the edge to macOS, seam colours
   the sidebar divider, content insets the page in a rounded frame. Colour: accent, border,
   active container or custom; width and active/inactive opacity are adjustable. The accent
