@@ -43,6 +43,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if !restored {
             browser.newWindow()
         }
+        prewarmSpellChecker()
+    }
+
+    /// The first focus of an address or command field starts the shared spell checker (~10 ms on the
+    /// main thread, from the field editor's text checking). Start it after launch instead, once no
+    /// input has arrived for a second, so it lands on neither launch nor a scroll or keystroke.
+    private func prewarmSpellChecker() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard !NSSpellChecker.sharedSpellCheckerExists else { return }
+            let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
+            if idle >= 1 { _ = NSSpellChecker.shared } else { self?.prewarmSpellChecker() }
+        }
     }
 
     /// One running instance per profile: an flock on the profile's state directory.

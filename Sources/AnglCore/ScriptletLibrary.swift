@@ -15,13 +15,16 @@ public struct ScriptletLibrary: Sendable {
     public init(_ source: String) {
         whole = source
         var seenFunction = false
-        for line in source.split(separator: "\n", omittingEmptySubsequences: false) {
-            if line.hasPrefix("function "), let paren = line.firstIndex(of: "(") {
+        // Byte-wise: splitting 600 KB by Character costs ~8 ms of launch; by UTF-8 byte, ~2. Every
+        // anchor below is ASCII, so its UTF-8 offsets are also character offsets.
+        for bytes in source.utf8.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: false) {
+            let line = Substring(bytes)
+            if bytes.starts(with: "function ".utf8), let paren = bytes.firstIndex(of: UInt8(ascii: "(")) {
                 seenFunction = true
-                definitions[line[line.index(line.startIndex, offsetBy: 9)..<paren]] = line
-            } else if line.hasPrefix("functions[\""), let close = line.range(of: "\"]="), line.hasSuffix(";") {
-                let name = line[line.index(line.startIndex, offsetBy: 11)..<close.lowerBound]
-                registrations[name] = (line[close.upperBound..<line.index(before: line.endIndex)], line)
+                definitions[line[line.utf8.index(line.startIndex, offsetBy: 9)..<paren]] = line
+            } else if bytes.starts(with: "functions[\"".utf8), bytes.last == UInt8(ascii: ";"), let close = line.range(of: "\"]=") {
+                let name = line[line.utf8.index(line.startIndex, offsetBy: 11)..<close.lowerBound]
+                registrations[name] = (line[close.upperBound..<line.utf8.index(before: line.endIndex)], line)
             } else if seenFunction {
                 epilogue.append(line)
             } else {

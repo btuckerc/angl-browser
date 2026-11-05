@@ -23,7 +23,8 @@ final class Browser {
     let paths: Paths
     private(set) var settings: Settings
     private(set) var theme: Theme
-    private(set) var style: Style
+    /// A new style's colors make new tint keys: the old style's tinted glyphs go with it.
+    private(set) var style: Style { didSet { Style.dropTintedSymbols() } }
     private(set) var workspaces: WorkspaceConfig
     private(set) var sites: SiteStore
     private(set) var bookmarks: BookmarkStore

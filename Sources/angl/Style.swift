@@ -56,6 +56,20 @@ struct Style {
         return image
     }
     private static var symbols: [String: NSImage?] = [:]
+
+    /// `symbol` tinted, shared per glyph and color: a redraw reuses one image and its cached
+    /// raster instead of re-rendering the vector glyph through a fresh drawing handler. Dropped
+    /// when the browser's style changes, so live theme edits don't accumulate them.
+    func symbol(_ name: String, size: CGFloat? = nil, weight: NSFont.Weight = .regular, tint: NSColor) -> NSImage? {
+        let key = TintKey(name: name, size: size ?? glyph - 2, weight: weight.rawValue, color: tint)
+        if let hit = Style.tinted[key] { return hit }
+        let image = symbol(name, size: size, weight: weight)?.tinted(tint)
+        Style.tinted[key] = image
+        return image
+    }
+    private struct TintKey: Hashable { let name: String, size: CGFloat, weight: CGFloat, color: NSColor }
+    private static var tinted: [TintKey: NSImage?] = [:]
+    static func dropTintedSymbols() { tinted.removeAll() }
 }
 
 /// WCAG contrast of `a` drawn over the opaque `b` (1…21): a translucent `a` is blended into `b` first.

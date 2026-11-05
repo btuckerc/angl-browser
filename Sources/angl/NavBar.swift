@@ -620,7 +620,7 @@ final class SuggestionList: NSView {
                 s.selected.setFill(); r.fill()
                 s.accent.setFill(); NSRect(x: 1, y: y, width: 2, height: r.height).fill()
             }
-            if let img = s.symbol(item.glyph)?.tinted(s.secondary) {
+            if let img = s.symbol(item.glyph, tint: s.secondary) {
                 img.draw(in: NSRect(x: 10, y: y + (r.height - img.size.height) / 2, width: img.size.width, height: img.size.height))
             }
             var hintW: CGFloat = 0

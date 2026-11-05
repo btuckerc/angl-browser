@@ -348,7 +348,7 @@ final class SidebarView: FlatView, NSOutlineViewDataSource, NSOutlineViewDelegat
         if n.isFolder {
             cell.title.stringValue = n.title
             cell.title.textColor = s.secondary
-            cell.icon.image = s.symbol("folder")?.tinted(s.secondary)
+            cell.icon.image = s.symbol("folder", tint: s.secondary)
             cell.icon.alphaValue = 1
             let count = n.subtree.filter { !$0.isFolder }.count
             cell.badge.stringValue = n.collapsed && count > 0 ? "\(count)" : ""
@@ -360,13 +360,13 @@ final class SidebarView: FlatView, NSOutlineViewDataSource, NSOutlineViewDelegat
             cell.title.textColor = loaded ? s.primary : s.muted
             let internalPage = n.url?.scheme == InternalPages.scheme
             cell.icon.image = t?.favicon ?? Tab.storedFavicon(for: n.url)
-                ?? (internalPage ? s.symbol("square.fill", size: 10)?.tinted(s.accent)
-                    : s.symbol(n.url == nil ? "plus.square.dashed" : "globe")?.tinted(s.muted))
+                ?? (internalPage ? s.symbol("square.fill", size: 10, tint: s.accent)
+                    : s.symbol(n.url == nil ? "plus.square.dashed" : "globe", tint: s.muted))
             cell.icon.alphaValue = loaded ? 1 : 0.55
             cell.badge.stringValue = n.collapsed && !n.children.isEmpty ? "\(n.subtree.count - 1)" : ""
             let muted = t?.muted ?? false
             cell.audio.isHidden = !muted && !(t?.isPlaying ?? false)
-            cell.audio.image = s.symbol(muted ? "speaker.slash" : "speaker.wave.2", size: 10)?.tinted(s.muted)
+            cell.audio.image = s.symbol(muted ? "speaker.slash" : "speaker.wave.2", size: 10, tint: s.muted)
         }
         cell.needsLayout = true
     }
@@ -889,7 +889,7 @@ final class PinnedRows: NSView, NSViewToolTipOwner {
                     s.accent.setFill(); NSRect(x: r.minX, y: r.minY, width: 2, height: r.height).fill()
                 }
                 let loaded = t?.isLoaded == true || active
-                let img = t?.favicon ?? Tab.storedFavicon(for: n.url) ?? s.symbol("globe")?.tinted(s.muted)
+                let img = t?.favicon ?? Tab.storedFavicon(for: n.url) ?? s.symbol("globe", tint: s.muted)
                 img?.draw(in: NSRect(x: 12, y: r.midY - 7, width: 14, height: 14), from: .zero, operation: .sourceOver,
                           fraction: loaded ? 1 : 0.55, respectFlipped: true, hints: nil)
                 let attrs: [NSAttributedString.Key: Any] = [.font: s.ui, .foregroundColor: loaded ? s.primary : s.muted]
@@ -897,7 +897,7 @@ final class PinnedRows: NSView, NSViewToolTipOwner {
                 let th = ceil(title.size(withAttributes: attrs).height)
                 var titleRight: CGFloat = 8
                 if let t, t.muted || t.isPlaying,
-                   let glyph = s.symbol(t.muted ? "speaker.slash" : "speaker.wave.2", size: 10)?.tinted(s.muted) {
+                   let glyph = s.symbol(t.muted ? "speaker.slash" : "speaker.wave.2", size: 10, tint: s.muted) {
                     glyph.draw(in: NSRect(x: r.maxX - 22, y: r.midY - 6, width: 12, height: 12), from: .zero,
                                operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
                     titleRight = 26
@@ -1006,7 +1006,7 @@ final class FavoriteStrip: NSView, NSViewToolTipOwner {
             for (index, bookmark) in bookmarks.enumerated() {
                 let r = rect(index)
                 let image = bookmark.url.flatMap(URL.init(string:)).flatMap(Tab.storedFavicon(for:))
-                    ?? style.symbol("bookmark")?.tinted(style.secondary)
+                    ?? style.symbol("bookmark", tint: style.secondary)
                 image?.draw(in: NSRect(x: r.midX - 7, y: r.midY - 7, width: 14, height: 14),
                             from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
             }

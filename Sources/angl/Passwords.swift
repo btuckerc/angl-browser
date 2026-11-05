@@ -1193,7 +1193,6 @@ private final class PickerList: NSView {
     private var hovered: Int? { didSet { if hovered != oldValue { needsDisplay = true } } }
     /// VoiceOver sees one element per row; kept here because AX doesn't retain them.
     private var axRows: [PressableElement] = []
-    private var badges: [String: NSImage] = [:]
 
     var armed: Bool { selected != nil }
 
@@ -1356,7 +1355,7 @@ private final class PickerList: NSView {
         style.border.setStroke()
         let edge = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5)); edge.lineWidth = 1; edge.stroke()
         if searching {
-            if let glass = badge("magnifyingglass", size: 13, color: style.secondary) {
+            if let glass = style.symbol("magnifyingglass", size: 13, tint: style.secondary) {
                 glass.draw(in: NSRect(x: 19 - glass.size.width / 2, y: 1 + (Self.searchBand - glass.size.height) / 2,
                                       width: glass.size.width, height: glass.size.height))
             }
@@ -1377,15 +1376,6 @@ private final class PickerList: NSView {
         }
         if hairline { style.border.setFill(); NSRect(x: 1, y: footerTop - 1, width: bounds.width - 2, height: 1).fill() }
         for i in split..<rows.count { drawRow(i) }
-    }
-
-    /// A tinted symbol, cached per name, size and color.
-    private func badge(_ name: String, size: CGFloat = 11, color: NSColor) -> NSImage? {
-        let key = "\(name)|\(size)|\(color.description)"
-        if let hit = badges[key] { return hit }
-        guard let image = style.symbol(name, size: size)?.tinted(color) else { return nil }
-        badges[key] = image
-        return image
     }
 
     private static func lineHeight(_ font: NSFont) -> CGFloat { ceil(font.ascender - font.descender + font.leading) }
@@ -1429,7 +1419,7 @@ private final class PickerList: NSView {
                 .filter(\.0).map(\.1)
             drawLines(row, in: r, selected: i == selected, host: e.showHost ? e.host : nil, badges: badges)
         case .passkey:
-            if let img = badge("person.badge.key.fill", size: 14, color: style.accent) {
+            if let img = style.symbol("person.badge.key.fill", size: 14, tint: style.accent) {
                 img.draw(in: NSRect(x: r.minX + 18 - img.size.width / 2, y: r.midY - img.size.height / 2, width: img.size.width, height: img.size.height))
             }
             drawLines(row, in: r, selected: i == selected, host: nil, badges: [])
@@ -1441,7 +1431,7 @@ private final class PickerList: NSView {
             case .logIn: "person.crop.circle"
             default: "key"
             }
-            if let img = badge(glyph, size: 13, color: style.accent) {
+            if let img = style.symbol(glyph, size: 13, tint: style.accent) {
                 img.draw(in: NSRect(x: r.minX + 18 - img.size.width / 2, y: r.midY - img.size.height / 2, width: img.size.width, height: img.size.height))
             }
             var trailing = right
@@ -1474,7 +1464,7 @@ private final class PickerList: NSView {
         text(row.title, x: textX, y: titleY, width: titleRight - textX, font: titleFont, color: style.primary)
         var badgeX = trailing
         for name in badges {
-            guard let img = badge(name, color: style.muted) else { continue }
+            guard let img = style.symbol(name, size: 11, tint: style.muted) else { continue }
             badgeX -= img.size.width
             img.draw(in: NSRect(x: badgeX, y: subY + (subH - img.size.height) / 2, width: img.size.width, height: img.size.height))
             badgeX -= 6
