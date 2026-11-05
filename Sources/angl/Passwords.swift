@@ -22,8 +22,11 @@ final class Passwords: NSObject {
         let field: String
         let document: String
         var anchor: NSRect
-        /// A username field narrows the logins by what's typed in it; a password field never reports its text.
-        let filters: Bool
+        enum Kind: String { case user, password, code }
+        /// A username field narrows the logins by what's typed in it; a password field never
+        /// reports its text; a one-time code field takes a login's code.
+        let kind: Kind
+        var filters: Bool { kind == .user }
         var query: String
         /// The username the page shows next to a password field (a password step): its logins rank first.
         let username: String?
@@ -31,6 +34,8 @@ final class Passwords: NSObject {
         var explicit: Bool
         /// The field takes passkeys (autocomplete "webauthn"): the page's waiting passkey-autofill request lists them.
         var webauthn = false
+        /// A code field the page marks autocomplete="one-time-code" (not just one that may be).
+        var hinted = false
     }
 
     private(set) lazy var bitwarden: Bitwarden = {
@@ -145,10 +150,11 @@ final class Passwords: NSObject {
             let anchor = anchorRect(r, exact: body["exact"] as? Bool ?? false, in: wv)
             let username = (body["username"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             let t = Target(tab: tab, frame: message.frameInfo, origin: origin, url: url, field: field, document: document, anchor: anchor,
-                           filters: body["kind"] as? String == "user", query: body["query"] as? String ?? "", username: username,
-                           explicit: explicit, webauthn: body["webauthn"] as? Bool ?? false)
-            // Same field, picker up: follow it (scroll, resize), unless it now takes passkeys.
-            if let cur = target, cur.field == field, cur.document == document, cur.webauthn == t.webauthn, picker != nil {
+                           kind: (body["kind"] as? String).flatMap(Target.Kind.init) ?? .user, query: body["query"] as? String ?? "",
+                           username: username, explicit: explicit, webauthn: body["webauthn"] as? Bool ?? false,
+                           hinted: body["hinted"] as? Bool ?? false)
+            // Same field, picker up: follow it (scroll, resize), unless it now takes passkeys or codes.
+            if let cur = target, cur.field == field, cur.document == document, cur.webauthn == t.webauthn, cur.kind == t.kind, picker != nil {
                 target = t
                 picker?.anchor(below: anchor)
                 return
@@ -187,16 +193,13 @@ final class Passwords: NSObject {
     private func show(for t: Target, keep: Bool = false) {
         resetIdleTimer()
         if let picker, picker.searching { return refreshSearch(picker) }
+        if t.kind == .code { return showCodes(for: t, keep: keep) }
         var rows: [Row] = [], footer: [Row] = []
         var arm = false, search = false
         if useBitwarden {
             switch bitwarden.state {
-            case .loggedOut:
-                rows = [.logIn]
-                arm = t.explicit
-            case .locked:
-                rows = [.unlock]
-                if settings.rememberUnlock, SealedKey.available, Keychain.exists(rememberedKey) { rows.insert(.touchID, at: 0) }
+            case .loggedOut, .locked:
+                rows = accountRows
                 arm = t.explicit
             case .unlocked:
                 bitwarden.refresh()
@@ -230,6 +233,46 @@ final class Passwords: NSObject {
         if settings.applePasswords { footer.append(.apple) }
         present(rows, footer: footer, arm: arm, keep: keep, for: t)
         if search { beginSearch() }
+    }
+
+    /// Log in or unlock, while Bitwarden is either.
+    private var accountRows: [Row] {
+        switch bitwarden.state {
+        case .loggedOut: [.logIn]
+        case .locked: settings.rememberUnlock && SealedKey.available && Keychain.exists(rememberedKey) ? [.touchID, .unlock] : [.unlock]
+        case .unlocked: []
+        }
+    }
+
+    /// A one-time code field: the page's logins that have a code. Any field asking for "the code"
+    /// may be one, so on focus the picker appears only with codes to offer (or, locked, for a
+    /// field marked one-time-code); ⌘\ always.
+    private func showCodes(for t: Target, keep: Bool) {
+        guard useBitwarden else {
+            if t.explicit { t.tab?.owner.toast("One-time codes come from Bitwarden (Settings › Passwords)", color: Browser.shared.style.secondary) }
+            return closePicker()
+        }
+        var rows = accountRows, footer: [Row] = [], arm = t.explicit
+        if bitwarden.state == .unlocked {
+            bitwarden.refresh()
+            let found = codeMatches(for: t)
+            guard t.explicit || !found.isEmpty else { return closePicker() }
+            if found.isEmpty {
+                rows = [.note("No one-time codes saved for \(Self.display(t.url))")]
+                arm = false
+            } else {
+                rows = Self.sections(found, page: t.url, headed: false)
+                arm = found[0].tier <= .nearHost
+            }
+            footer = [.search]
+        } else if !t.explicit, !t.hinted {
+            return closePicker()
+        }
+        present(rows, footer: footer, arm: arm, keep: keep, for: t)
+    }
+
+    private func codeMatches(for t: Target) -> [LoginIndex.Match] {
+        pageMatches(for: t).filter(\.login.hasTOTP)
     }
 
     /// The page's logins, best first: this site's own before other sites on its domain, then by
@@ -382,13 +425,15 @@ final class Passwords: NSObject {
     private func refreshSearch(_ picker: PasswordPicker) {
         guard let t = target, canSearch, let index = bitwarden.index else { return closePicker() }
         let q = picker.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let page = pageMatches(for: t)
+        let codes = t.kind == .code
+        let page = codes ? codeMatches(for: t) : pageMatches(for: t)
         var rows: [Row]
         if q.isEmpty {
-            rows = page.isEmpty ? [.note("No logins saved for \(Self.display(t.url)) · type to search")] : Self.sections(page, page: t.url, headed: false)
+            rows = page.isEmpty ? [.note("No \(codes ? "one-time codes" : "logins") saved for \(Self.display(t.url)) · type to search")]
+                : Self.sections(page, page: t.url, headed: false)
         } else {
-            let found = index.search(q, lastUsed: bitwarden.usage.lastUsed)
-            rows = found.isEmpty ? [.note("No logins match “\(q)”")]
+            let found = index.search(q, lastUsed: bitwarden.usage.lastUsed, including: { !codes || $0.hasTOTP })
+            rows = found.isEmpty ? [.note("No \(codes ? "logins with a one-time code" : "logins") match “\(q)”")]
                 : found.map { .login(Entry(login: $0, host: index.site(of: $0.id), showHost: true)) }
         }
         picker.set(rows: rows, footer: [], arm: true, keep: false, width: 480)
@@ -449,9 +494,10 @@ final class Passwords: NSObject {
 
     // MARK: Fill
 
-    /// Fills login `id` as the vault has it now: the row may predate a sync, so whether it
-    /// matches this page (or needs Fill Once) and whether it asks for the master password are
-    /// decided here, and the fill goes ahead only if the vault didn't change meanwhile.
+    /// Fills login `id` (or, into a code field, its one-time code) as the vault has it now: the
+    /// row may predate a sync, so whether it matches this page (or needs Fill Once) and whether
+    /// it asks for the master password are decided here, and the fill goes ahead only if the
+    /// vault didn't change meanwhile.
     private func fill(_ id: String, into t: Target, in window: NSWindow) async {
         let epoch = bitwarden.epoch
         guard let revision = bitwarden.settledRevision, let index = bitwarden.index,
@@ -462,6 +508,15 @@ final class Passwords: NSObject {
             if login.reprompt, !(await reprompt(in: window)) { return }
             let c = try await bitwarden.credentials(id)
             guard revision == bitwarden.settledRevision else { return vaultMoved(t) }
+            if t.kind == .code {
+                guard let code = c.totp else {
+                    t.tab?.owner.toast("“\(login.title)” has no one-time code", color: Browser.shared.style.warn)
+                    return
+                }
+                guard try await put(code: code, into: t), revision == bitwarden.settledRevision else { return }
+                bitwarden.recordUse(id)
+                return
+            }
             guard let filled = try await put(username: c.username, password: c.password, into: t),
                   revision == bitwarden.settledRevision else { return }
             bitwarden.recordUse(id)
@@ -488,6 +543,18 @@ final class Passwords: NSObject {
             in: t.frame, contentWorld: Self.world)
         guard let filled = result as? [String: Any] else { t.tab?.owner.toast("The sign-in field is gone", color: Browser.shared.style.warn); return nil }
         return (filled["username"] as? Bool ?? false, filled["password"] as? Bool ?? false)
+    }
+
+    /// Fills a one-time code field (split one-digit boxes take a digit each). false = it's gone,
+    /// or its boxes don't fit the code.
+    private func put(code: String, into t: Target) async throws -> Bool {
+        guard isCurrent(t), let wv = t.tab?.webView else { return false }
+        let result = try await wv.callAsyncJavaScript(
+            "return window.__anglPasswordsFillCode(field, documentToken, origin, code)",
+            arguments: ["field": t.field, "documentToken": t.document, "origin": t.origin, "code": code],
+            in: t.frame, contentWorld: Self.world)
+        guard result as? Bool == true else { t.tab?.owner.toast("Couldn't fill the code field", color: Browser.shared.style.warn); return false }
+        return true
     }
 
     private func copy(_ code: String, tab: Tab?) {

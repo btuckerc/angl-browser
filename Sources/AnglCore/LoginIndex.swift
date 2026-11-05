@@ -156,12 +156,13 @@ public struct LoginIndex: Sendable {
     }
 
     /// Logins whose name, username or URI hosts contain every word of `query` (case-insensitive):
-    /// word-start matches first, then last use, favorites, name.
-    public func search(_ query: String, lastUsed: [String: Double] = [:], limit: Int = 200) -> [Login] {
+    /// word-start matches first, then last use, favorites, name. `including` narrows before the limit.
+    public func search(_ query: String, lastUsed: [String: Double] = [:], limit: Int = 200,
+                       including: (Login) -> Bool = { _ in true }) -> [Login] {
         let words = query.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
         guard !words.isEmpty else { return [] }
         var scored: [(score: Int, login: Login)] = []
-        for (i, fields) in haystacks.enumerated() {
+        for (i, fields) in haystacks.enumerated() where including(logins[i]) {
             var score = 0
             for word in words {
                 var best = 0
