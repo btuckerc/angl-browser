@@ -212,9 +212,10 @@ ticket. Tags are `vVERSION` and match `VERSION`.
   are tinted from the accent unless `theme.json` pins `"color": {"border": "#rrggbb"}`.
 - **Light appearance**: `theme.json` `"appearance": "light"` draws the chrome, palette and
   angl:// pages in a light set whose text also reads at 4.5:1; `"system"` follows macOS. An
-  accent too pale for a light background (white) is darkened to 3:1. `"colorLight"` overrides
-  light colours the way `"color"` does dark; your `"color"` values carry over to light
-  unless `colorLight` sets them. Theme edits restyle open angl:// pages without a reload.
+  accent too pale for a light background (white) is darkened until links read at 4.5:1.
+  `"colorLight"` overrides light colours the way `"color"` does dark; of `"color"`, only the
+  accent and Space colours carry over to light. Theme edits restyle open angl:// pages
+  without a reload.
 - **Snapshots** (⇧⌘S, automatic every 10 min) save every window, Space and tab;
   `angl://snapshots` restores them. ⇧⌘O hands the page to another installed browser.
 - Pages: `angl://settings`, `spaces` (Spaces and Containers), `sites`, `history` (⌘Y), `downloads` (⌘⌥L),

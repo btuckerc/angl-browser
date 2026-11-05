@@ -131,19 +131,23 @@ public final class HistoryStore: @unchecked Sendable {
     }
 
     /// A LIKE pattern matching `text` anywhere, literally: `%`, `_` and `\` are escaped (use with `ESCAPE '\'`).
+    /// By scalar, as SQLite reads it: `_` followed by a combining mark is one Character but still a wildcard.
     static func likeContains<S: StringProtocol>(_ text: S) -> String {
-        var pattern = "%"
-        for c in text {
-            if c == "%" || c == "_" || c == "\\" { pattern.append("\\") }
-            pattern.append(c)
+        var pattern = String.UnicodeScalarView()
+        pattern.append("%")
+        for u in text.unicodeScalars {
+            if u == "%" || u == "_" || u == "\\" { pattern.append("\\") }
+            pattern.append(u)
         }
-        return pattern + "%"
+        pattern.append("%")
+        return String(pattern)
     }
 
     /// Searches every whitespace-separated term; ranked by frecency, or newest first when `recent`.
     public func query(_ text: String, limit: Int, offset: Int, recent: Bool = false) -> [HistoryItem] {
         let terms = text.split(whereSeparator: { $0.isWhitespace }).map(Self.likeContains)
-        let clauses = terms.map { _ in #"(url LIKE ? ESCAPE '\' COLLATE NOCASE OR title LIKE ? ESCAPE '\' COLLATE NOCASE)"# }
+        // LIKE ignores collation; it is ASCII case-insensitive by default.
+        let clauses = terms.map { _ in #"(url LIKE ? ESCAPE '\' OR title LIKE ? ESCAPE '\')"# }
         let whereClause = clauses.isEmpty ? "" : "WHERE " + clauses.joined(separator: " AND ")
         let order = recent ? "last_visit DESC" : "(visit_count+2*typed_count)/(1+MAX(0,(strftime('%s','now')-last_visit)/86400.0)) DESC,last_visit DESC"
         let sql = "SELECT url,title,last_visit,visit_count FROM visits \(whereClause) ORDER BY \(order) LIMIT ? OFFSET ?"
@@ -268,7 +272,7 @@ public final class HistoryStore: @unchecked Sendable {
         queue.sync {
             guard let db else { return [] }
             var statement: OpaquePointer?
-            let sql = #"SELECT payload FROM recovery WHERE reason=? AND (url LIKE ? ESCAPE '\' COLLATE NOCASE OR title LIKE ? ESCAPE '\' COLLATE NOCASE) ORDER BY created_at DESC LIMIT ? OFFSET ?"#
+            let sql = #"SELECT payload FROM recovery WHERE reason=? AND (url LIKE ? ESCAPE '\' OR title LIKE ? ESCAPE '\') ORDER BY created_at DESC LIMIT ? OFFSET ?"#
             guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
             defer { sqlite3_finalize(statement) }
             let pattern = Self.likeContains(text)

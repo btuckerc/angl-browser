@@ -315,11 +315,12 @@ enum Suggestions {
     /// A filter (`h `, `b `, `a `) lists this many; the list scrolls past `SuggestionList.visible`.
     static let filterLimit = 50
 
-    static func compute(_ text: String, window w: BrowserWindowController) -> [Suggestion] {
+    /// `recents`: an empty field lists this window's recent tabs (the floating palette); else nothing.
+    static func compute(_ text: String, window w: BrowserWindowController, recents: Bool = false) -> [Suggestion] {
         let b = Browser.shared!
         switch Omnibox.parse(text, settings: b.settings.search) {
         case .empty:
-            return recentTabs(w)
+            return recents ? recentTabs(w) : []
         case .command(let q):
             return Commands.palette(q, window: w).map { e in
                 Suggestion(kind: .command, title: e.title, detail: e.detail, hint: e.hint) { _ in e.run(w) }

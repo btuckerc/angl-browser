@@ -813,11 +813,12 @@ final class WorkspaceStrip: NSView, NSViewToolTipOwner {
             let e = PressableElement(.radioButton, w.name, in: self)
             e.setAccessibilityValue(w.id == o.workspaceID ? 1 : 0)
             if i < 9 { e.setAccessibilityHelp("⌃\(i + 1)") }
-            e.press = { o.switchWorkspace(index: i); return true }
+            // Weak: the cache lives in this view, so a strong owner here keeps a closed window alive.
+            e.press = { [weak self] in self?.owner.switchWorkspace(index: i); return self != nil }
             return e
         }
         let add = PressableElement(.button, "New Space", in: self)
-        add.press = { o.newWorkspace(); return true }
+        add.press = { [weak self] in self?.owner.newWorkspace(); return self != nil }
         items.append(add)
         for (i, e) in items.enumerated() { e.place(rect(i), in: self) }
         axItems = items
@@ -954,9 +955,9 @@ final class PinnedRows: NSView, NSViewToolTipOwner {
         let o = owner
         let rows = nodes.enumerated().map { i, n in
             let e = PressableElement(.row, title(n, o.liveTab(n)), in: self, selected: o.active?.node === n)
-            e.press = { [weak n] in
-                guard let n else { return false }
-                o.activate(o.tab(n))
+            e.press = { [weak self, weak n] in
+                guard let self, let n else { return false }
+                self.owner.activate(self.owner.tab(n))
                 return true
             }
             e.place(rect(i), in: self)

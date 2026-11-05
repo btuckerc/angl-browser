@@ -7,7 +7,7 @@ public struct Theme: Codable, Equatable, Sendable {
     public var radius: Double = 0
     public var font = Fonts()
     /// The palette. In light appearance, `colorLight` is drawn instead: the built-in light palette
-    /// with the user's `color` keys and then their `colorLight` keys on top (see `layered(user:)`).
+    /// with the user's appearance-neutral `color` keys and then their `colorLight` keys on top (see `layered(user:)`).
     public var color = Colors()
     public var colorLight = Colors.light
     public var metrics = Metrics()
@@ -175,21 +175,27 @@ public struct Theme: Codable, Equatable, Sendable {
 
     /// The theme as drawn in one appearance: `color` is that appearance's palette and `appearance`
     /// says which (so `cssVariables` exports a definite `color-scheme`). In light, an accent under
-    /// 3:1 on the backgrounds — a white accent chosen for dark — is darkened until it reaches 3:1.
+    /// 4.5:1 on the backgrounds — a white accent chosen for dark — is darkened until it reaches 4.5:1:
+    /// angl:// pages draw links in it.
     public func resolved(dark: Bool) -> Theme {
         var t = self
         t.appearance = dark ? .dark : .light
         if !dark {
             t.color = colorLight
-            t.color.accent = colorLight.lifted(colorLight.accent, to: 3)
+            t.color.accent = colorLight.lifted(colorLight.accent, to: 4.5)
         }
         return t
     }
 
-    /// A partial user theme layered over the defaults. `color` keys apply to both appearances:
-    /// they're layered under the user's `colorLight`, which then goes over the light palette.
+    /// `color` keys that also draw light. Backgrounds, text, status colours and a pinned border are
+    /// chosen for dark: carried into light they can sit unreadably on (or vanish into) the light palette.
+    static let sharedColorKeys: Set<String> = ["accent", "workspaces"]
+
+    /// A partial user theme layered over the defaults. `color`'s `sharedColorKeys` are layered under
+    /// the user's `colorLight`, which then goes over the light palette.
     public static func layered(user: Any) throws -> Theme {
-        guard var u = user as? [String: Any], let shared = u["color"] else { return try JSONFile.layered(Theme(), user: user) }
+        guard var u = user as? [String: Any], let color = u["color"] as? [String: Any] else { return try JSONFile.layered(Theme(), user: user) }
+        let shared = color.filter { sharedColorKeys.contains($0.key) }
         u["colorLight"] = u["colorLight"].map { JSONFile.merge(shared, $0) } ?? shared
         return try JSONFile.layered(Theme(), user: u)
     }

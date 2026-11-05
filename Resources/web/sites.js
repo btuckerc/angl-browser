@@ -1,9 +1,11 @@
 // Per-site override table
 let sites = [];
+// Each row's controls are named "<column> for <host>": the table headings don't name them.
+const COLUMNS = { javascript: 'JavaScript', blocker: 'Blocker', blockRemoteFonts: 'Remote fonts', square: 'Square', dark: 'Dark', hardening: 'Hardening', zoom: 'Zoom', volumeDB: 'Volume dB' };
 
-function triState(value, change) {
+function triState(value, change, label) {
   const selected = value == null ? 'default' : value ? 'on' : 'off';
-  const select = el('select', {}, ...['default', 'on', 'off'].map((option) => el('option', { value: option, selected: option === selected }, option)));
+  const select = el('select', { 'aria-label': label }, ...['default', 'on', 'off'].map((option) => el('option', { value: option, selected: option === selected }, option)));
   select.addEventListener('change', () => change(select.value === 'default' ? undefined : select.value === 'on'));
   return select;
 }
@@ -22,11 +24,11 @@ function render() {
         if (value === undefined) delete site.overrides[key];
         else site.overrides[key] = value;
         save(site);
-      }));
+      }, `${COLUMNS[key]} for ${site.host}`));
       row.append(cell);
     });
     [['dark', ['off', 'auto', 'force']], ['hardening', ['off', 'noJIT', 'lockdown']]].forEach(([key, values]) => {
-      const choice = el('select', {}, ...['default', ...values].map((value) => el('option', { value, selected: (site.overrides[key] || 'default') === value }, value)));
+      const choice = el('select', { 'aria-label': `${COLUMNS[key]} for ${site.host}` }, ...['default', ...values].map((value) => el('option', { value, selected: (site.overrides[key] || 'default') === value }, value)));
       choice.addEventListener('change', () => {
         if (choice.value === 'default') delete site.overrides[key];
         else site.overrides[key] = choice.value;
@@ -35,7 +37,7 @@ function render() {
       row.append(el('td', {}, choice));
     });
     ['zoom', 'volumeDB'].forEach((key) => {
-      const input = el('input', { type: 'number', step: key === 'zoom' ? '0.1' : '1', value: site.overrides[key] ?? '' });
+      const input = el('input', { type: 'number', step: key === 'zoom' ? '0.1' : '1', value: site.overrides[key] ?? '', 'aria-label': `${COLUMNS[key]} for ${site.host}` });
       input.placeholder = 'default';
       input.addEventListener('change', () => {
         if (input.value === '') delete site.overrides[key];
@@ -44,7 +46,7 @@ function render() {
       });
       row.append(el('td', {}, input));
     });
-    row.append(el('td', {}, el('button', { onclick: () => angl.call('sites.reset', { host: site.host }).then(load).catch((error) => toast(error.message)) }, 'Reset')));
+    row.append(el('td', {}, el('button', { 'aria-label': `Reset ${site.host}`, onclick: () => angl.call('sites.reset', { host: site.host }).then(load).catch((error) => toast(error.message)) }, 'Reset')));
     body.append(row);
   });
   empty.textContent = sites.length ? 'No sites match.' : 'No site settings yet.';

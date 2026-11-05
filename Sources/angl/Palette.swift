@@ -114,7 +114,7 @@ final class PaletteView: FlatView, NSTextFieldDelegate {
         list.style = owner.style
         // The empty tab's own field stays bare until typed into; the floating palette offers recent tabs.
         list.items = tabChooser ? chooserItems(field.stringValue)
-            : docked && field.stringValue.isEmpty ? [] : Suggestions.compute(field.stringValue, window: owner)
+            : docked && field.stringValue.isEmpty ? [] : Suggestions.compute(field.stringValue, window: owner, recents: !docked)
         if !tabChooser { owner.preconnect(list.current?.preconnect, newTab: newTab) }
         onResize()
         needsLayout = true
@@ -174,7 +174,9 @@ final class PaletteView: FlatView, NSTextFieldDelegate {
         (field.cell as? PromptCell)?.prompt = docked && owner.browser.theme.window.caret == .block ? s : nil
         caret?.color = s.accent
         focusChanged()
-        refresh()
+        // Restyle the rows in place: rebuilding them would put the selection Return acts on back at row 0.
+        list.style = s; list.needsDisplay = true
+        onResize(); needsLayout = true
     }
 }
 

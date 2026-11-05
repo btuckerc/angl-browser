@@ -90,7 +90,12 @@ final class StoresTests: XCTestCase {
         XCTAssertEqual(store.suggest("a_b", limit: 5).map(\.url), ["https://a_b.test/100%25"])
         XCTAssertEqual(store.query("a_b", limit: 5, offset: 0).map(\.url), ["https://a_b.test/100%25"])
         XCTAssertEqual(store.query("100%", limit: 5, offset: 0).map(\.url), ["https://a_b.test/100%25"])
+        XCTAssertEqual(store.query("A_B", limit: 5, offset: 0).map(\.url), ["https://a_b.test/100%25"])
         XCTAssertEqual(store.suggest("%", limit: 5).map(\.url), ["https://a_b.test/100%25"])
+        // `_` + U+0301 is one Character; SQLite still sees the `_`.
+        store.record(url: URL(string: "https://cafe.test/")!, title: "cafe\u{301}", typed: false)
+        XCTAssertEqual(store.query("caf_\u{301}", limit: 5, offset: 0).map(\.url), [])
+        XCTAssertEqual(store.query("cafe\u{301}", limit: 5, offset: 0).map(\.url), ["https://cafe.test/"])
     }
 
     func testRecoveryTableRoundTripsAndConsumesRecords() throws {

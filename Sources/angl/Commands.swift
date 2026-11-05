@@ -308,7 +308,8 @@ enum Commands {
             }
             row[c.title] = commands.count
             let t = c.title.lowercased()
-            let rank = !digit && c.id.last?.isNumber == true ? 3
+            // Numbered jumps (Tab 1…, Space 1…) go last unless a digit is typed; "Last Tab" (tab.9) isn't one.
+            let rank = !digit && t.last?.isNumber == true ? 3
                 : q.isEmpty || t.hasPrefix(q) ? 0
                 : t.split(separator: " ").contains(where: { $0.hasPrefix(verb) }) ? 1 : 2
             commands.append((rank, Entry(title: c.title, detail: "", hint: c.chordLabel) { w in c.run(w) }))

@@ -43,30 +43,35 @@ final class ThemeTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(contrastRatio(hc.fg.muted, "#f4f4f4") ?? 0, 4.5)
     }
 
-    /// `color` keys reach both appearances, `colorLight` keys only light (and win there); keys the
-    /// user didn't write keep each palette's own defaults.
+    /// `color` draws dark; only its appearance-neutral keys (accent, Space colours) reach light, where
+    /// `colorLight` keys win. Backgrounds, text and status colours chosen for dark stay out of light.
     func testColorLayersUnderColorLight() throws {
         let t = try Theme.layered(user: [
-            "color": ["accent": "#ffffff", "warn": "#111111"],
-            "colorLight": ["warn": "#222222", "bg": ["base": "#eeeeee"]],
+            "color": ["accent": "#ffffff", "workspaces": ["#123456"], "warn": "#111111", "bg": ["base": "#101010"], "fg": ["primary": "#f0f0f0"]],
+            "colorLight": ["warn": "#222222", "bg": ["sidebar": "#eeeeee"]],
         ])
         XCTAssertEqual(t.color.accent, "#ffffff")
         XCTAssertEqual(t.color.warn, "#111111")
-        XCTAssertEqual(t.color.bg.base, Theme.Colors().bg.base)
+        XCTAssertEqual(t.color.bg.base, "#101010")
         XCTAssertEqual(t.colorLight.accent, "#ffffff")
+        XCTAssertEqual(t.colorLight.workspaces, ["#123456"])
         XCTAssertEqual(t.colorLight.warn, "#222222")
-        XCTAssertEqual(t.colorLight.bg.base, "#eeeeee")
-        XCTAssertEqual(t.colorLight.bg.sidebar, Theme.Colors.light.bg.sidebar)
+        XCTAssertEqual(t.colorLight.bg.sidebar, "#eeeeee")
+        XCTAssertEqual(t.colorLight.bg.base, Theme.Colors.light.bg.base)
+        XCTAssertEqual(t.colorLight.fg, Theme.Colors.light.fg)
         XCTAssertEqual(t.resolved(dark: true).color, t.color)
         XCTAssertEqual(t.resolved(dark: false).color.warn, "#222222")
     }
 
-    /// A white accent picked for dark still reads as a highlight in light: lifted to 3:1 on the light
-    /// backgrounds. An accent that already passes is drawn as written.
-    func testLightAccentIsFlooredAtThreeToOne() throws {
-        let white = try Theme.layered(user: ["color": ["accent": "#ffffff"]]).resolved(dark: false)
-        for bg in [white.color.bg.base, white.color.bg.sidebar, white.color.bg.raised] {
-            XCTAssertGreaterThanOrEqual(try XCTUnwrap(contrastRatio(white.color.accent, bg)), 3)
+    /// Every accent swatch Settings offers, picked for dark, reads as link text in light (4.5:1 on the
+    /// light backgrounds) and still marks the selected row (3:1). An accent that already passes is drawn as written.
+    func testLightAccentReadsAsText() throws {
+        for hex in ["#ffffff", "#55c3e8", "#f5d90a", "#ff4fa3"] {
+            let light = try Theme.layered(user: ["color": ["accent": hex]]).resolved(dark: false).color
+            for bg in [light.bg.base, light.bg.sidebar, light.bg.raised] {
+                XCTAssertGreaterThanOrEqual(try XCTUnwrap(contrastRatio(light.accent, bg)), 4.5, hex)
+            }
+            XCTAssertGreaterThanOrEqual(try XCTUnwrap(contrastRatio(light.accent, light.bg.selected)), 3, hex)
         }
         XCTAssertEqual(try Theme.layered(user: ["color": ["accent": "#ffffff"]]).resolved(dark: true).color.accent, "#ffffff")
         XCTAssertEqual(Theme().resolved(dark: false).color.accent, Theme.Colors.light.accent)
