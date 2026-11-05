@@ -112,7 +112,9 @@ final class PaletteView: FlatView, NSTextFieldDelegate {
 
     private func refresh() {
         list.style = owner.style
-        list.items = tabChooser ? chooserItems(field.stringValue) : Suggestions.compute(field.stringValue, window: owner)
+        // The empty tab's own field stays bare until typed into; the floating palette offers recent tabs.
+        list.items = tabChooser ? chooserItems(field.stringValue)
+            : docked && field.stringValue.isEmpty ? [] : Suggestions.compute(field.stringValue, window: owner)
         if !tabChooser { owner.preconnect(list.current?.preconnect, newTab: newTab) }
         onResize()
         needsLayout = true

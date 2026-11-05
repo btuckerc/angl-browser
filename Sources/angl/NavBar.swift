@@ -319,7 +319,7 @@ enum Suggestions {
         let b = Browser.shared!
         switch Omnibox.parse(text, settings: b.settings.search) {
         case .empty:
-            return []
+            return recentTabs(w)
         case .command(let q):
             return Commands.palette(q, window: w).map { e in
                 Suggestion(kind: .command, title: e.title, detail: e.detail, hint: e.hint) { _ in e.run(w) }
@@ -370,6 +370,12 @@ enum Suggestions {
             }
         }
         return out
+    }
+
+    /// Empty field: this window's other tabs, most recently used first.
+    private static func recentTabs(_ w: BrowserWindowController) -> [Suggestion] {
+        tabMatches("", w).sorted { $0.0.lastActive > $1.0.lastActive }
+            .prefix(limit).map { tab($0, $1, w) }
     }
 
     private static func tab(_ n: TabNode, _ ws: Workspace, _ w: BrowserWindowController) -> Suggestion {

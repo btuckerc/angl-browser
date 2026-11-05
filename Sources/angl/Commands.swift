@@ -293,19 +293,30 @@ enum Commands {
             }
         }
         // Commands bound to two chords (Next Tab: ⌃⇥ and ⌘⇧]) show as one row with both.
+        // Typed text that starts the title comes first, then text that starts a word of it, then the rest;
+        // the numbered jumps (Tab 1…, Space 1…) last unless a digit was typed. Menu order within each.
+        let digit = q.contains(where: \.isNumber)
+        var commands: [(rank: Int, entry: Entry)] = []
         var row: [String: Int] = [:]
         for c in all {
             let hay = (c.title + " " + c.id.replacingOccurrences(of: ".", with: " ")).lowercased()
             guard q.isEmpty || words.allSatisfy({ hay.contains($0) }) else { continue }
             if c.needsWindow && window == nil { continue }
             if let i = row[c.title] {
-                out[i].hint = [out[i].hint, c.chordLabel].filter { !$0.isEmpty }.joined(separator: " ")
+                commands[i].entry.hint = [commands[i].entry.hint, c.chordLabel].filter { !$0.isEmpty }.joined(separator: " ")
                 continue
             }
-            row[c.title] = out.count
-            out.append(Entry(title: c.title, detail: "", hint: c.chordLabel) { w in c.run(w) })
+            row[c.title] = commands.count
+            let t = c.title.lowercased()
+            let rank = !digit && c.id.last?.isNumber == true ? 3
+                : q.isEmpty || t.hasPrefix(q) ? 0
+                : t.split(separator: " ").contains(where: { $0.hasPrefix(verb) }) ? 1 : 2
+            commands.append((rank, Entry(title: c.title, detail: "", hint: c.chordLabel) { w in c.run(w) }))
         }
-        return out
+        let order = commands.indices.sorted { a, b in
+            commands[a].rank != commands[b].rank ? commands[a].rank < commands[b].rank : a < b
+        }
+        return out + order.map { commands[$0].entry }
     }
 
     // MARK: Menus
