@@ -72,8 +72,9 @@ public struct Theme: Codable, Equatable, Sendable {
             let extremes = ["#ffffff", "#000000"].sorted { worst($0) > worst($1) }
             for end in [fg.primary] + extremes {
                 guard let to = parseHexColor(end) else { continue }
-                // Every 8-bit colour on the line, nearest first: cut it where any channel's rounding
-                // flips (value k + 0.5) and sample once between cuts, so none is skipped.
+                // Every colour the line rounds to, nearest first: cut it where any channel's value
+                // crosses k + 0.5, then try between each pair of cuts and at the cut itself (where
+                // channels crossing together round up, a colour neither side of the cut has).
                 var cuts: [Double] = [0, 1]
                 for (a, b) in [(from.r, to.r), (from.g, to.g), (from.b, to.b)] where a != b {
                     let lo = min(a, b) * 255, hi = max(a, b) * 255
@@ -82,10 +83,12 @@ public struct Theme: Codable, Equatable, Sendable {
                 }
                 cuts.sort()
                 for (t0, t1) in zip(cuts, cuts.dropFirst()) where t1 > t0 {
-                    let t = (t0 + t1) / 2
-                    func mix(_ x: Double, _ y: Double) -> Int { Int(((x * (1 - t) + y * t) * 255).rounded()) }
-                    let candidate = String(format: "#%02x%02x%02x", mix(from.r, to.r), mix(from.g, to.g), mix(from.b, to.b))
-                    if worst(candidate) >= ratio { return candidate }
+                    // At a cut the value is k + 0.5 up to float error; the nudge rounds it up, as exact arithmetic would.
+                    for (t, nudge) in [((t0 + t1) / 2, 0.0), (t1, 1e-7)] {
+                        func mix(_ x: Double, _ y: Double) -> Int { Int(((x * (1 - t) + y * t) * 255 + nudge).rounded()) }
+                        let candidate = String(format: "#%02x%02x%02x", mix(from.r, to.r), mix(from.g, to.g), mix(from.b, to.b))
+                        if worst(candidate) >= ratio { return candidate }
+                    }
                 }
             }
             return extremes[0]

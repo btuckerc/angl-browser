@@ -60,6 +60,12 @@ final class ThemeTests: XCTestCase {
                 XCTAssertGreaterThanOrEqual(try XCTUnwrap(contrastRatio(band, bg)), 4.5, band)
             }
         }
+        // Two channels crossing a rounding boundary at the same point, in opposite directions, give a
+        // colour only that point has: #747474 → #737574 first passes (on black) at #747574.
+        var near = Theme.Colors()
+        near.bg = .init(base: "#000000", sidebar: "#000000", raised: "#000000", selected: "#222222")
+        near.fg = .init(primary: "#737574", secondary: "#a3a29f", muted: "#747474")
+        XCTAssertEqual(near.increasedContrast.fg.muted, "#747574")
     }
 
     /// A light theme moves toward its own (dark) primary; tokens that already pass are left alone.
