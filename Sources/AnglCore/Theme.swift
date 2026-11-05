@@ -61,8 +61,9 @@ public struct Theme: Codable, Equatable, Sendable {
         }
 
         /// `hex` moved toward `fg.primary` only as far as it takes to reach `ratio` against the base,
-        /// sidebar and raised backgrounds; when even the primary falls short, toward white or black,
-        /// whichever reads better (and that extreme if nothing reaches). A colour that already passes, or doesn't parse, stays.
+        /// sidebar and raised backgrounds; when no colour on that line does, toward white or black,
+        /// whichever reads better (and that extreme if no colour on any of the three lines reaches).
+        /// A colour that already passes, or doesn't parse, stays.
         func lifted(_ hex: String, to ratio: Double) -> String {
             guard let from = parseHexColor(hex) else { return hex }
             let backgrounds = [bg.base, bg.sidebar, bg.raised]
@@ -71,9 +72,17 @@ public struct Theme: Codable, Equatable, Sendable {
             let extremes = ["#ffffff", "#000000"].sorted { worst($0) > worst($1) }
             for end in [fg.primary] + extremes {
                 guard let to = parseHexColor(end) else { continue }
-                // One step per 8-bit level, so no passing colour between two steps is skipped.
-                for step in 1...255 {
-                    let t = Double(step) / 255
+                // Every 8-bit colour on the line, nearest first: cut it where any channel's rounding
+                // flips (value k + 0.5) and sample once between cuts, so none is skipped.
+                var cuts: [Double] = [0, 1]
+                for (a, b) in [(from.r, to.r), (from.g, to.g), (from.b, to.b)] where a != b {
+                    let lo = min(a, b) * 255, hi = max(a, b) * 255
+                    var v = (lo + 0.5).rounded(.down) + 0.5
+                    while v < hi { cuts.append((v / 255 - a) / (b - a)); v += 1 }
+                }
+                cuts.sort()
+                for (t0, t1) in zip(cuts, cuts.dropFirst()) where t1 > t0 {
+                    let t = (t0 + t1) / 2
                     func mix(_ x: Double, _ y: Double) -> Int { Int(((x * (1 - t) + y * t) * 255).rounded()) }
                     let candidate = String(format: "#%02x%02x%02x", mix(from.r, to.r), mix(from.g, to.g), mix(from.b, to.b))
                     if worst(candidate) >= ratio { return candidate }

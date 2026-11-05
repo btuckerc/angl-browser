@@ -48,14 +48,17 @@ final class ThemeTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(try XCTUnwrap(contrastRatio(hcl.fg.secondary, bg)), 7)
             XCTAssertGreaterThanOrEqual(try XCTUnwrap(contrastRatio(hcl.resolvedBorder, bg)), 3)
         }
-        // Black and white surfaces leave two greys that pass both (#757575, #767676);
-        // the lift finds one instead of giving up on an extreme that is 1:1 against one of them.
-        var split = Theme.Colors()
-        split.bg = .init(base: "#000000", sidebar: "#ffffff", raised: "#000000", selected: "#222222")
-        split.fg = .init(primary: "#dedede", secondary: "#a3a29f", muted: "#8c8c8c")
-        let band = split.increasedContrast.fg.muted
-        for bg in ["#000000", "#ffffff"] {
-            XCTAssertGreaterThanOrEqual(try XCTUnwrap(contrastRatio(band, bg)), 4.5, band)
+        // Black against a (near-)white surface leaves only a sliver of passing colours (#757575/#767676);
+        // the lift finds it instead of giving up on an extreme that is ~1:1 against one of them.
+        // #fffefe → black only passes at #757474, where the channels round apart.
+        for (sidebar, primary, muted) in [("#ffffff", "#dedede", "#8c8c8c"), ("#fbfbfb", "#fffefe", "#fffefe")] {
+            var split = Theme.Colors()
+            split.bg = .init(base: "#000000", sidebar: sidebar, raised: "#000000", selected: "#222222")
+            split.fg = .init(primary: primary, secondary: "#a3a29f", muted: muted)
+            let band = split.increasedContrast.fg.muted
+            for bg in ["#000000", sidebar] {
+                XCTAssertGreaterThanOrEqual(try XCTUnwrap(contrastRatio(band, bg)), 4.5, band)
+            }
         }
     }
 
