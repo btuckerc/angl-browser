@@ -30,7 +30,7 @@ final class InternalPages: NSObject, WKURLSchemeHandler {
         let mime: String
         if host == "theme.css" {
             let b = Browser.shared!
-            var css = b.theme.cssVariables
+            var css = b.style.theme.cssVariables // the drawn theme: Increase Contrast reaches the pages too
             css += (try? String(contentsOf: b.paths.cssDir.appendingPathComponent("_angl.css"), encoding: .utf8)) ?? ""
             data = Data(css.utf8)
             mime = "text/css"

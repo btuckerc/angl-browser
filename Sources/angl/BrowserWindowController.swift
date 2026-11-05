@@ -1037,6 +1037,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
             MainActor.assumeIsolated {
                 guard let self, self.peeking != show else { return }
                 self.peeking = show
+                // Reduce Motion: the sidebar appears and goes without sliding.
+                guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { self.root.layoutPanes(animated: false); return }
                 NSAnimationContext.runAnimationGroup { ctx in
                     ctx.duration = 0.12
                     ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)

@@ -51,7 +51,7 @@ final class Browser {
         }
         settings = load("settings.json", Settings()) { try Settings.load(from: paths.settingsFile) }
         theme = load("theme.json", Theme()) { try Theme.load(from: paths.themeFile) }
-        style = Style(theme)
+        style = Browser.style(for: theme)
         var ws = load("workspaces.json", WorkspaceConfig.initial()) {
             try JSONFile.read(WorkspaceConfig.self, from: paths.workspacesFile) ?? WorkspaceConfig.initial()
         }
@@ -69,6 +69,10 @@ final class Browser {
 
     func start() {
         applyAppearance()
+        _ = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { Browser.shared.restyle() }
+        }
         Passwords.shared.start()
         web.start(settings: settings)
         watcher = ConfigWatcher(dirs: [paths.configDir, paths.cssDir]) { [weak self] in self?.reloadConfig() }
@@ -195,7 +199,7 @@ final class Browser {
         var problems: [String] = []
         do {
             let t = try Theme.load(from: paths.themeFile)
-            if t != theme { theme = t; style = Style(t); applyAppearance(); post(.anglTheme) }
+            if t != theme { theme = t; restyle() }
         } catch { problems.append("theme.json: \(error.localizedDescription)") }
         do {
             let s = try Settings.load(from: paths.settingsFile)
@@ -207,6 +211,17 @@ final class Browser {
         Commands.loadOverrides(paths)
         if keys != Commands.overrides { NSApp.mainMenu = Commands.buildMainMenu() }
         if !problems.isEmpty { frontWindow?.toast(problems.joined(separator: " · "), color: style.warn) }
+    }
+
+    /// The user's theme as drawn: with stronger text and hairlines while macOS Increase Contrast is on.
+    private static func style(for t: Theme) -> Style {
+        Style(NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast ? t.increasedContrast : t)
+    }
+
+    private func restyle() {
+        style = Browser.style(for: theme)
+        applyAppearance()
+        post(.anglTheme)
     }
 
     private func applyAppearance() {
@@ -230,7 +245,7 @@ final class Browser {
     /// Write one theme token (dot path) into the user's partial theme.json.
     func setTheme(path: String, value: Any?) throws {
         let t: Theme = try writeLayered(Theme(), file: paths.themeFile, path: path, value: value)
-        if t != theme { theme = t; style = Style(t); applyAppearance(); post(.anglTheme) }
+        if t != theme { theme = t; restyle() }
     }
 
     /// Set `path` in a partial user JSON file, validating the merged result before writing so a

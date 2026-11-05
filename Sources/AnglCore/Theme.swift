@@ -56,6 +56,28 @@ public struct Theme: Codable, Equatable, Sendable {
             func mix(_ x: Double, _ y: Double) -> Int { Int(((x * 0.35 + y * 0.65) * 255).rounded()) }
             return String(format: "#%02x%02x%02x", mix(a.r, b.r), mix(a.g, b.g), mix(a.b, b.b))
         }
+
+        /// The colours drawn while macOS Increase Contrast is on: muted text reaches 4.5:1 against every
+        /// background (WCAG AA), secondary text 7:1, hairlines 3:1, each moved toward `fg.primary` only as far
+        /// as that takes. Colours that already pass, or don't parse, stay.
+        public var increasedContrast: Colors {
+            var c = self
+            let backgrounds = [bg.base, bg.sidebar, bg.raised]
+            func strengthen(_ hex: String, to ratio: Double) -> String {
+                guard let from = parseHexColor(hex), let to = parseHexColor(fg.primary) else { return hex }
+                for step in 0...20 {
+                    let t = Double(step) / 20
+                    func mix(_ x: Double, _ y: Double) -> Int { Int(((x * (1 - t) + y * t) * 255).rounded()) }
+                    let candidate = String(format: "#%02x%02x%02x", mix(from.r, to.r), mix(from.g, to.g), mix(from.b, to.b))
+                    if backgrounds.allSatisfy({ (contrastRatio(candidate, $0) ?? 0) >= ratio }) { return step == 0 ? hex : candidate }
+                }
+                return fg.primary
+            }
+            c.fg.muted = strengthen(fg.muted, to: 4.5)
+            c.fg.secondary = strengthen(fg.secondary, to: 7)
+            c.border = strengthen(resolvedBorder, to: 3)
+            return c
+        }
     }
 
     public struct Metrics: Codable, Equatable, Sendable {
@@ -126,6 +148,13 @@ public struct Theme: Codable, Equatable, Sendable {
         }
     }
 
+    /// The theme with `Colors.increasedContrast`.
+    public var increasedContrast: Theme {
+        var t = self
+        t.color = color.increasedContrast
+        return t
+    }
+
     public static func load(from url: URL) throws -> Theme {
         try JSONFile.layered(Theme(), file: url)
     }
@@ -163,4 +192,15 @@ public func parseHexColor(_ hex: String) -> (r: Double, g: Double, b: Double, a:
         return (Double((v >> 16) & 0xFF) / 255, Double((v >> 8) & 0xFF) / 255, Double(v & 0xFF) / 255, 1)
     }
     return (Double((v >> 24) & 0xFF) / 255, Double((v >> 16) & 0xFF) / 255, Double((v >> 8) & 0xFF) / 255, Double(v & 0xFF) / 255)
+}
+
+/// WCAG 2 contrast ratio of two hex colours (1…21); alpha is ignored. Invalid input → nil.
+public func contrastRatio(_ a: String, _ b: String) -> Double? {
+    func luminance(_ hex: String) -> Double? {
+        guard let c = parseHexColor(hex) else { return nil }
+        func lin(_ v: Double) -> Double { v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+        return 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+    }
+    guard let la = luminance(a), let lb = luminance(b) else { return nil }
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
 }
