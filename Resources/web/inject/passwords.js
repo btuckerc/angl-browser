@@ -73,9 +73,11 @@
   const askRoot = (el) => el.form || el.closest('[role="dialog"], dialog, main, section, article') || el.parentElement?.parentElement?.parentElement;
   const asks = (el) => ASKS.test((askRoot(el)?.textContent || '').slice(0, 4000));
   // The one-digit boxes `el` is one of, in order, among the 4–8 in its nearest ancestor (up to
-  // four up): all of them when one is marked one-time-code (some sites mark only the first);
-  // else those that are numeric or named for a code, when there are 4 or more; else unmarked
-  // boxes that are the only text entry in a form asking for a code.
+  // four up). With any box numeric, marked one-time-code or named for a code: those boxes plus
+  // the ones with no name of their own ("Digit 3" or none; some sites mark only the first), so
+  // boxes named for something else (initials) stay out. With none: unmarked boxes that are the
+  // only text entry in a form asking for a code.
+  const GENERIC = /\b(digit|char|character|box|input|field|cell|item)\b/g;
   const boxes = (el) => {
     if (el.maxLength !== 1 || !codeType(el)) return null;
     let all = null;
@@ -86,9 +88,11 @@
     if (!all || all.length > 8 || !all.includes(el)) return null;
     const names = all.map(describe);
     if (names.some((d) => NOT_CODE.test(d))) return null;
-    if (all.some(hinted)) return all;
-    const digits = all.filter((b, i) => numeric(b) || named(names[i]));
-    if (digits.length) return digits.length >= 4 && digits.includes(el) ? digits : null;
+    const marked = all.map((b, i) => numeric(b) || hinted(b) || named(names[i]));
+    if (marked.some(Boolean)) {
+      const digits = all.filter((b, i) => marked[i] || !/[a-z]/.test(names[i].replace(GENERIC, '')));
+      return digits.length >= 4 && digits.includes(el) ? digits : null;
+    }
     const root = askRoot(el);
     return root && asks(el) && inputs(root).every((i) => !codeType(i) || all.includes(i)) ? all : null;
   };
