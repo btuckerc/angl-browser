@@ -154,10 +154,11 @@ final class StatusOverlay: FlatView {
         guard let s = style else { return }
         let msg: String?, color: NSColor, maxWidth: CGFloat
         if let toast {
-            // Toast text stays readable (4.5:1 on the overlay) whatever colour the caller or theme picked.
+            // Toast text stays readable (4.5:1 on the overlay) whatever colour the caller or theme picked:
+            // the tint, else secondary, else primary, else white or black (one of which always reaches 4.5:1).
             let tint = toast.tint(s)
             msg = toast.text
-            color = contrast(tint, s.base) >= 4.5 ? tint : s.secondary
+            color = [tint, s.secondary, s.primary, .white, .black].first { contrast($0, s.base) >= 4.5 } ?? s.primary
             text.lineBreakMode = .byTruncatingTail
             maxWidth = area.width
         } else {

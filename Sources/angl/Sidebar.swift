@@ -450,34 +450,35 @@ final class SidebarView: FlatView, NSOutlineViewDataSource, NSOutlineViewDelegat
         contextMenu(for: n, selection: selection, into: menu)
     }
 
+    /// The outline keeps its menu after it closes, so items hold the window weakly: a closed window is freed.
     func contextMenu(for n: TabNode, selection: [TabNode], into menu: NSMenu) {
         let o = owner
         if n.isFolder {
             menu.addItem(ClosureMenuItem("Rename") { [weak self] in self?.beginRename(n) })
-            menu.addItem(ClosureMenuItem("Load All") { o.load(n) })
-            menu.addItem(ClosureMenuItem("Unload All") { o.unload(n) })
-            menu.addItem(ClosureMenuItem("Ungroup") { o.ungroup(n) })
+            menu.addItem(ClosureMenuItem("Load All") { [weak o] in o?.load(n) })
+            menu.addItem(ClosureMenuItem("Unload All") { [weak o] in o?.unload(n) })
+            menu.addItem(ClosureMenuItem("Ungroup") { [weak o] in o?.ungroup(n) })
         } else {
             let t = o.tab(n)
             menu.addItem(ClosureMenuItem("Reload") { t.reload(fromOrigin: false) })
-            menu.addItem(ClosureMenuItem("Duplicate") { o.duplicate(t) })
-            menu.addItem(ClosureMenuItem(o.tree.isPinned(n) ? "Unpin" : "Pin") { o.togglePin(t) })
+            menu.addItem(ClosureMenuItem("Duplicate") { [weak o] in o?.duplicate(t) })
+            menu.addItem(ClosureMenuItem(o.tree.isPinned(n) ? "Unpin" : "Pin") { [weak o] in o?.togglePin(t) })
             if o.browser.settings.tabs.favorites, n.url != nil {
                 let isFavorite = o.browser.bookmarks.flattened().contains { $0.url == n.url?.absoluteString && $0.favorite }
-                menu.addItem(ClosureMenuItem(isFavorite ? "Remove from Favorites" : "Add to Favorites") { o.toggleFavorite(n) })
+                menu.addItem(ClosureMenuItem(isFavorite ? "Remove from Favorites" : "Add to Favorites") { [weak o] in o?.toggleFavorite(n) })
             }
             if o.browser.settings.tabs.splitView {
-                if o.isSplitMember(n) { menu.addItem(ClosureMenuItem("Exit Split") { o.exitSplit() }) }
+                if o.isSplitMember(n) { menu.addItem(ClosureMenuItem("Exit Split") { [weak o] in o?.exitSplit() }) }
                 else if o.active !== t, o.workspaceID(of: n) == o.workspaceID {
-                    menu.addItem(ClosureMenuItem("Split with Active Tab") { o.split(with: n) })
+                    menu.addItem(ClosureMenuItem("Split with Active Tab") { [weak o] in o?.split(with: n) })
                 }
             }
             menu.addItem(ClosureMenuItem(t.muted ? "Unmute" : "Mute") { t.toggleMute() })
-            if t.isLoaded, o.active !== t { menu.addItem(ClosureMenuItem("Unload") { o.unload(n) }) }
+            if t.isLoaded, o.active !== t { menu.addItem(ClosureMenuItem("Unload") { [weak o] in o?.unload(n) }) }
             let containers = NSMenu()
             for c in o.browser.workspaces.containers {
-                containers.addItem(ClosureMenuItem(c.name, state: o.container(for: n).id == c.id ? .on : .off) {
-                    o.move(t, toContainer: c.id)
+                containers.addItem(ClosureMenuItem(c.name, state: o.container(for: n).id == c.id ? .on : .off) { [weak o] in
+                    o?.move(t, toContainer: c.id)
                 })
             }
             let ci = NSMenuItem(title: "Move to Container", action: nil, keyEquivalent: "")
@@ -493,8 +494,8 @@ final class SidebarView: FlatView, NSOutlineViewDataSource, NSOutlineViewDelegat
         }
         let spaces = NSMenu()
         for w in o.browser.workspaces.workspaces {
-            spaces.addItem(ClosureMenuItem(w.name, state: w.id == o.workspaceID ? .on : .off, enabled: w.id != o.workspaceID) {
-                for s in selection { o.move(s, toWorkspace: w.id) }
+            spaces.addItem(ClosureMenuItem(w.name, state: w.id == o.workspaceID ? .on : .off, enabled: w.id != o.workspaceID) { [weak o] in
+                for s in selection { o?.move(s, toWorkspace: w.id) }
             })
         }
         let si = NSMenuItem(title: "Move to Space", action: nil, keyEquivalent: "")
@@ -502,18 +503,19 @@ final class SidebarView: FlatView, NSOutlineViewDataSource, NSOutlineViewDelegat
         menu.addItem(si)
         menu.addItem(.separator())
         if !o.tree.isPinned(n) {
-            menu.addItem(ClosureMenuItem(selection.count > 1 ? "Group \(selection.count) into Folder" : "Group into Folder", key: "") {
-                o.group(selection)
+            menu.addItem(ClosureMenuItem(selection.count > 1 ? "Group \(selection.count) into Folder" : "Group into Folder", key: "") { [weak o] in
+                o?.group(selection)
             })
         }
         menu.addItem(.separator())
-        menu.addItem(ClosureMenuItem(n.isFolder ? "Close Folder (keep tabs)" : "Close") {
+        menu.addItem(ClosureMenuItem(n.isFolder ? "Close Folder (keep tabs)" : "Close") { [weak o] in
+            guard let o else { return }
             for s in selection { if o.tree.node(s.id) != nil { o.close(node: s, subtree: false) } }
         })
         if !n.children.isEmpty || n.isFolder {
-            menu.addItem(ClosureMenuItem("Close with Children") { o.close(node: n, subtree: true) })
+            menu.addItem(ClosureMenuItem("Close with Children") { [weak o] in o?.close(node: n, subtree: true) })
         }
-        if !n.isFolder { menu.addItem(ClosureMenuItem("Close Others") { o.closeOthers(n) }) }
+        if !n.isFolder { menu.addItem(ClosureMenuItem("Close Others") { [weak o] in o?.closeOthers(n) }) }
     }
 }
 

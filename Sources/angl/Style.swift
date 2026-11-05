@@ -60,15 +60,12 @@ struct Style {
 
 /// WCAG contrast of `a` drawn over the opaque `b` (1…21): a translucent `a` is blended into `b` first.
 func contrast(_ a: NSColor, _ b: NSColor) -> Double {
-    guard let fg = a.usingColorSpace(.sRGB), let bg = b.usingColorSpace(.sRGB) else { return 21 }
-    func hex(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat) -> String {
+    func hex(_ color: NSColor) -> String {
+        guard let c = color.usingColorSpace(.sRGB) else { return "" }
         func byte(_ v: CGFloat) -> Int { Int((min(max(v, 0), 1) * 255).rounded()) }
-        return String(format: "#%02x%02x%02x", byte(r), byte(g), byte(b))
+        return String(format: "#%02x%02x%02x%02x", byte(c.redComponent), byte(c.greenComponent), byte(c.blueComponent), byte(c.alphaComponent))
     }
-    let α = fg.alphaComponent
-    func over(_ f: CGFloat, _ g: CGFloat) -> CGFloat { f * α + g * (1 - α) }
-    let drawn = hex(over(fg.redComponent, bg.redComponent), over(fg.greenComponent, bg.greenComponent), over(fg.blueComponent, bg.blueComponent))
-    return contrastRatio(drawn, hex(bg.redComponent, bg.greenComponent, bg.blueComponent)) ?? 21
+    return contrastRatio(hex(a), hex(b)) ?? 21
 }
 
 /// A flat view with a solid background and optional hairlines. No layers tricks, no vibrancy.

@@ -246,13 +246,13 @@ public func parseHexColor(_ hex: String) -> (r: Double, g: Double, b: Double, a:
     return (Double((v >> 24) & 0xFF) / 255, Double((v >> 16) & 0xFF) / 255, Double((v >> 8) & 0xFF) / 255, Double(v & 0xFF) / 255)
 }
 
-/// WCAG 2 contrast ratio of two hex colours (1…21); alpha is ignored. Invalid input → nil.
+/// WCAG 2 contrast ratio of `a` drawn over `b` (1…21): a translucent `a` is blended into `b` first;
+/// `b`'s own alpha is ignored (it is the opaque surface). Invalid input → nil.
 public func contrastRatio(_ a: String, _ b: String) -> Double? {
-    func luminance(_ hex: String) -> Double? {
-        guard let c = parseHexColor(hex) else { return nil }
-        func lin(_ v: Double) -> Double { v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
-        return 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
-    }
-    guard let la = luminance(a), let lb = luminance(b) else { return nil }
+    guard let f = parseHexColor(a), let g = parseHexColor(b) else { return nil }
+    func lin(_ v: Double) -> Double { v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+    func luminance(_ r: Double, _ gr: Double, _ bl: Double) -> Double { 0.2126 * lin(r) + 0.7152 * lin(gr) + 0.0722 * lin(bl) }
+    func over(_ x: Double, _ y: Double) -> Double { x * f.a + y * (1 - f.a) }
+    let la = luminance(over(f.r, g.r), over(f.g, g.g), over(f.b, g.b)), lb = luminance(g.r, g.g, g.b)
     return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
 }

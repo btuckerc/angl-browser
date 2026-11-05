@@ -294,9 +294,16 @@ enum Commands {
         }
         // Commands bound to two chords (Next Tab: ⌃⇥ and ⌘⇧]) show as one row with both.
         // Typed text that starts the title comes first, then text that starts a word of it, then the rest;
-        // the numbered jumps (Tab 1…, Space 1…) last unless a digit was typed. Menu order within each.
+        // titles ending in a number (Tab 1…, Space 1…, a Space named "Work 1") last unless a digit was typed.
+        // Verb rows and commands share the ranking; verb rows first, menu order within each rank.
         let digit = q.contains(where: \.isNumber)
-        var commands: [(rank: Int, entry: Entry)] = []
+        func rank(_ title: String) -> Int {
+            let t = title.lowercased()
+            return !digit && t.last?.isNumber == true ? 3
+                : q.isEmpty || t.hasPrefix(q) ? 0
+                : t.split(separator: " ").contains(where: { $0.hasPrefix(verb) }) ? 1 : 2
+        }
+        var commands: [(rank: Int, entry: Entry)] = out.map { (rank($0.title), $0) }
         var row: [String: Int] = [:]
         for c in all {
             let hay = (c.title + " " + c.id.replacingOccurrences(of: ".", with: " ")).lowercased()
@@ -307,17 +314,12 @@ enum Commands {
                 continue
             }
             row[c.title] = commands.count
-            let t = c.title.lowercased()
-            // Numbered jumps (Tab 1…, Space 1…) go last unless a digit is typed; "Last Tab" (tab.9) isn't one.
-            let rank = !digit && t.last?.isNumber == true ? 3
-                : q.isEmpty || t.hasPrefix(q) ? 0
-                : t.split(separator: " ").contains(where: { $0.hasPrefix(verb) }) ? 1 : 2
-            commands.append((rank, Entry(title: c.title, detail: "", hint: c.chordLabel) { w in c.run(w) }))
+            commands.append((rank(c.title), Entry(title: c.title, detail: "", hint: c.chordLabel) { w in c.run(w) }))
         }
         let order = commands.indices.sorted { a, b in
             commands[a].rank != commands[b].rank ? commands[a].rank < commands[b].rank : a < b
         }
-        return out + order.map { commands[$0].entry }
+        return order.map { commands[$0].entry }
     }
 
     // MARK: Menus

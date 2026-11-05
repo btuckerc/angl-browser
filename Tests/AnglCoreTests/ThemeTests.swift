@@ -6,6 +6,9 @@ final class ThemeTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(contrastRatio("#000000", "#ffffff")), 21, accuracy: 0.001)
         XCTAssertEqual(try XCTUnwrap(contrastRatio("#777777", "#777777")), 1, accuracy: 0.001)
         XCTAssertNil(contrastRatio("nope", "#ffffff"))
+        // A translucent foreground is measured as drawn: blended into the surface.
+        XCTAssertEqual(try XCTUnwrap(contrastRatio("#ffffff00", "#1d1d1d")), 1, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(contrastRatio("#00000080", "#ffffff")), try XCTUnwrap(contrastRatio("#7f7f7f", "#ffffff")), accuracy: 0.01)
     }
 
     /// Default text, including the status colours toasts and pages draw as text, reads at WCAG AA
@@ -35,6 +38,15 @@ final class ThemeTests: XCTestCase {
         for bg in [dim.bg.base, dim.bg.sidebar, dim.bg.raised] {
             XCTAssertGreaterThanOrEqual(try XCTUnwrap(contrastRatio(hd.fg.muted, bg)), 4.5)
             XCTAssertGreaterThanOrEqual(try XCTUnwrap(contrastRatio(hd.fg.secondary, bg)), 7)
+        }
+        // Transparent tokens count as invisible, not as their opaque colour.
+        var clear = Theme.Colors()
+        clear.fg.muted = "#ffffff00"; clear.fg.secondary = "#ffffff00"; clear.border = "#ffffff00"
+        let hcl = clear.increasedContrast
+        for bg in [clear.bg.base, clear.bg.sidebar, clear.bg.raised] {
+            XCTAssertGreaterThanOrEqual(try XCTUnwrap(contrastRatio(hcl.fg.muted, bg)), 4.5)
+            XCTAssertGreaterThanOrEqual(try XCTUnwrap(contrastRatio(hcl.fg.secondary, bg)), 7)
+            XCTAssertGreaterThanOrEqual(try XCTUnwrap(contrastRatio(hcl.resolvedBorder, bg)), 3)
         }
     }
 
