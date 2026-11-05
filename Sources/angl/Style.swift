@@ -186,7 +186,7 @@ final class PressableElement: NSAccessibilityElement {
 
     /// `r` is in the parent's own coordinates. AX parent space is bottom-up even for a flipped view:
     /// unflipped, VoiceOver's cursor lands on the mirrored item.
-    func place(_ r: NSRect, in parent: NSView) {
+    @MainActor func place(_ r: NSRect, in parent: NSView) {
         var r = r
         if parent.isFlipped { r.origin.y = parent.bounds.height - r.maxY }
         setAccessibilityFrameInParentSpace(r)
