@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# Compile packaging/AppIcon.icon (Icon Composer format: white fill, vector angl triangle) into
-# DEST (an .app's Contents/Resources): Assets.car for macOS 26+ and AppIcon.icns for older
-# systems. Cached in build/icon until the script or the .icon bundle changes.
+# Compile packaging/AppIcon.icon (Icon Composer document) into DEST (an .app's
+# Contents/Resources): Assets.car for macOS 26+ and AppIcon.icns for older systems. Its three
+# layers are the chevrons of packaging/angl.svg redrawn bolder for icon sizes: on the 1024 canvas,
+# 66-unit bands with 30-unit gaps (the previous icon had 38.5 and 22.4), corners rounded at r 8,
+# 740 wide, centered horizontally and raised 38 units (halfway from box-centered to
+# centroid-centered, so the triangle looks centered). Cached in build/icon until the script or the
+# .icon bundle changes.
 # Usage: scripts/icon.sh DEST
 set -euo pipefail
 cd "$(dirname "$0")/.."
