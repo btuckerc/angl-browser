@@ -278,10 +278,15 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
         let hadYouTubeFrames = youtubeFramesInstalled
         applied = Applied()
         if let u = webView?.url { _ = applyPolicy(for: u) }
-        // Switching Night audio off takes effect in the open page too, without a reload.
-        if hadNightAudio, !nightAudioInstalled {
+        // Night audio follows the switch in the open page too. Off hands back native audio at once;
+        // on resumes a script that is already there, or installs it for the page's next video (the
+        // current one's audio was appended unseen).
+        if hadNightAudio != nightAudioInstalled {
+            let js = nightAudioInstalled
+                ? "dispatchEvent(new Event('anglnightaudioon'));\n" + browser.web.scripts.source("night-audio.js")
+                : "dispatchEvent(new Event('anglnightaudiooff'))"
             for frame in [nil] + mediaFrames.values.map(\.info).filter({ !$0.isMainFrame }) {
-                webView?.evaluateJavaScript("dispatchEvent(new Event('anglnightaudiooff'))", in: frame, in: .page) { _ in }
+                webView?.evaluateJavaScript(js, in: frame, in: .page) { _ in }
             }
         }
         // The YouTube rule list blocks the open page's new thumbnails at once, so the script has to

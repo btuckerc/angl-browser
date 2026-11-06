@@ -2,10 +2,10 @@
 // FrankerFaceZ's player compressor (Web Audio DynamicsCompressorNode: threshold −50 dB, knee 40,
 // ratio 12, attack 0, release 0.25 s) without capturing system audio. WebKit gives Media Source
 // playback no Web Audio source, so each audio SourceBuffer's appends are mirrored here, decoded with
-// WebCodecs and played through the compressor in step with the video; the element's own audio track
-// is switched off only while that copy is playing. Anything this can't follow (encrypted media,
-// unknown containers or codecs, rates other than 1×, MediaSource in a worker, missing data) keeps
-// the element's native, uncompressed audio.
+// WebCodecs and played through the compressor in step with the video; the element itself is turned
+// down to inaudible only while that copy is playing, and the page keeps seeing the volume it set.
+// Anything this can't follow (encrypted media, unknown containers or codecs, rates other than 1×,
+// MediaSource in a worker, missing data) keeps the element's native, uncompressed audio.
 (() => {
   if (window.__anglNightAudio || !window.AudioDecoder || !window.AudioContext) return;
   const sourceClasses = [window.MediaSource, window.ManagedMediaSource].filter(Boolean);
@@ -18,6 +18,8 @@
   const LATE = 0.045; // shadow/video drift that forces a resync
   const PAUSE_GRACE = 10000; // ms a paused element stays on the copy before native audio returns
   const LOOKAHEAD = 0.006; // DynamicsCompressorNode's fixed pre-delay
+  const FADE = 0.005; // s: ramp at each start and restart of the copy, so neither clicks
+  const HANDOFF = 0.03; // s: the copy's fade-out once the element is unmuted
   const AUDIO = /\b(mp4a|opus|vorbis|flac|mp3|ac-3|ec-3)\b/i;
 
   // ---- byte helpers ----
@@ -252,13 +254,18 @@
   const sameBytes = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
   const sameConfig = (a, b) => !!a && !!b && a.codec === b.codec && a.sampleRate === b.sampleRate &&
     a.numberOfChannels === b.numberOfChannels && sameBytes(a.description, b.description);
+  const samePacket = (a, b) => Math.abs(a.t - b.t) < 1e-4 && a.config === b.config && sameBytes(a.data, b.data);
 
   // One audio SourceBuffer's packets, [{t, data, config}] in presentation order. An append's packets
-  // join once the SourceBuffer has accepted it, clipped to its append window.
+  // join once the SourceBuffer is done with it (its updateend, or the page's next call on that buffer),
+  // clipped to its append window. changedFrom..changedTo is the span whose packets were replaced or
+  // removed since the player last looked.
   class Feed {
-    constructor(type) { this.frames = []; this.pending = null; this.current = null; this.changed = Infinity; this.retype(type); }
+    constructor(type) { this.frames = []; this.pending = null; this.current = null; this.settle(); this.retype(type); }
     retype(type) { this.reader = /webm|matroska/i.test(type) ? new Webm() : /mp4/i.test(type) ? new Mp4() : null; }
     get config() { return this.reader && !this.reader.bad ? this.current : null; }
+    settle() { this.changedFrom = Infinity; this.changedTo = -Infinity; }
+    mark(from, to) { this.changedFrom = Math.min(this.changedFrom, from); this.changedTo = Math.max(this.changedTo, to); }
     parse(bytes, offset, start, end) {
       this.pending = null;
       if (!this.reader || this.reader.bad) return;
@@ -273,19 +280,25 @@
       const batch = this.pending;
       this.pending = null;
       if (!batch || !batch.length) return;
-      const a = this.frames, first = batch[0].t;
+      const a = this.frames, first = batch[0].t, last = batch[batch.length - 1].t;
       if (!a.length || a[a.length - 1].t < first - 1e-4) for (const f of batch) a.push(f);
       else {
-        const lo = lowerBound(a, first - 1e-4), hi = lowerBound(a, batch[batch.length - 1].t + 1e-4);
+        // A re-append of packets already in place (YouTube refetches) changes nothing; only the span
+        // from the first real difference counts.
+        const lo = lowerBound(a, first - 1e-4), hi = lowerBound(a, last + 1e-4);
+        let k = 0;
+        while (k < batch.length && lo + k < hi && samePacket(a[lo + k], batch[k])) k++;
+        if (k === batch.length && lo + k === hi) return;
         this.frames = a.slice(0, lo).concat(batch, a.slice(hi));
-        this.changed = Math.min(this.changed, first);
+        this.mark(k < batch.length ? batch[k].t : a[lo + k].t, Math.max(last, a[hi - 1] ? a[hi - 1].t : last));
       }
       const newest = this.frames[this.frames.length - 1].t;
       if (newest - this.frames[0].t > SPAN) this.frames = this.frames.slice(lowerBound(this.frames, newest - SPAN));
     }
     remove(start, end) {
+      const before = this.frames.length;
       this.frames = this.frames.filter((f) => f.t < start || f.t >= end);
-      this.changed = Math.min(this.changed, start);
+      if (this.frames.length !== before) this.mark(start, end);
     }
   }
 
@@ -308,8 +321,9 @@
         mirrors.set(sb, feed);
         if (!feeds.has(this)) feeds.set(this, new Set());
         feeds.get(this).add(feed);
-        // Registered before the page's own listeners, so packets are in place when it reacts.
-        sb.addEventListener("updateend", () => feed.commit());
+        // Registered before the page's own listeners, so packets are in place when it reacts. A late
+        // updateend, after the page's next append has already started, isn't that append's.
+        sb.addEventListener("updateend", () => { if (!sb.updating) feed.commit(); });
         sb.addEventListener("error", () => { feed.pending = null; feed.reader?.reset(); }); // WebKit resets its parser too
       }
       return sb;
@@ -323,7 +337,10 @@
   wrap(S, "appendBuffer", (append) => function (data) {
     const result = append.call(this, data);
     const feed = mirrors.get(this);
-    if (feed && !off) {
+    if (feed) {
+      // The last append is done (else this one would have thrown), but a page that appends again as
+      // soon as `updating` falls gets here before that append's updateend: it lands now.
+      feed.commit();
       try {
         if (sbMode.call(this) !== "segments") feed.reader = null; // sequence mode rewrites timestamps
         else feed.parse(data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
@@ -333,13 +350,15 @@
     return result;
   });
   wrap(S, "abort", (abort) => function () {
+    const done = !this.updating; // an append already finished stays
     abort.call(this);
     const feed = mirrors.get(this);
-    if (feed) { feed.pending = null; feed.reader?.reset(); }
+    if (feed) { if (done) feed.commit(); feed.pending = null; feed.reader?.reset(); }
   });
   wrap(S, "remove", (remove) => function (start, end) {
     remove.call(this, start, end);
-    mirrors.get(this)?.remove(start, end);
+    const feed = mirrors.get(this);
+    if (feed) { feed.commit(); feed.remove(start, end); }
   });
   wrap(S, "changeType", (change) => function (type) {
     change.call(this, type);
@@ -357,6 +376,56 @@
   });
   const sourceFor = (el) => (el.srcObject && feeds.has(el.srcObject) ? el.srcObject : urls.get(el.currentSrc)?.deref());
 
+  // ---- the element's own audio ----
+  // While the copy plays the element's own audio is turned down to EPS (−120 dB), not muted or its
+  // track switched off. With the track off WebKit stops growing that SourceBuffer's buffered range,
+  // so YouTube re-fetches and re-appends audio for as long as the copy plays, and turning the track
+  // back on can stall the video for seconds. A muted element counts as silent: WebKit pauses silent
+  // video in a hidden page (another tab, minimized, covered) and leaves it out of Now Playing. The
+  // page keeps reading and setting the volume it expects; `muted` stays the element's own.
+  const EPS = 1e-6;
+  const M = HTMLMediaElement.prototype;
+  const volumeProp = Object.getOwnPropertyDescriptor(M, "volume");
+  const shown = new WeakMap(); // turned-down element -> its volume as the page sees it
+  // Per-site volume (volume.js, angl's world). It treats a volume the page sets as already scaled, so
+  // without Night audio the element would land at the smaller of the two; the setter does the same.
+  let factor = 1;
+  addEventListener("anglvolumefactor", (e) => { const f = Number(e.detail); if (f >= 0 && f <= 1) factor = f; });
+  dispatchEvent(new Event("anglvolumequery"));
+  Object.defineProperty(M, "volume", {
+    configurable: true, enumerable: volumeProp.enumerable,
+    get() { return shown.has(this) ? shown.get(this) : volumeProp.get.call(this); },
+    set(value) {
+      const v = Number(value);
+      // Invalid values go to WebKit, which throws as it would without Night audio.
+      if (!shown.has(this) || !(v >= 0 && v <= 1)) return volumeProp.set.call(this, value);
+      shown.set(this, Math.min(v, factor));
+      volumeProp.set.call(this, Math.min(v, factor) * EPS);
+    },
+  });
+  const hush = (el) => {
+    if (shown.has(el)) return;
+    const v = volumeProp.get.call(el);
+    shown.set(el, v);
+    volumeProp.set.call(el, v * EPS);
+  };
+  const unhush = (el) => {
+    if (!shown.has(el)) return;
+    const v = shown.get(el);
+    shown.delete(el);
+    volumeProp.set.call(el, v);
+  };
+  // Writes from angl's isolated world (volume.js, per-site volume) skip the accessor. Its changes
+  // scale the turned-down volume, so the volume it means is that over EPS; anything louder is a
+  // volume set outright, which gets turned down too.
+  const resync = (el) => {
+    if (!shown.has(el)) return;
+    const real = volumeProp.get.call(el), want = shown.get(el) * EPS;
+    if (Math.abs(real - want) <= want * 1e-6) return;
+    if (real <= 1e-3) shown.set(el, Math.min(1, real / EPS));
+    else { shown.set(el, real); volumeProp.set.call(el, real * EPS); }
+  };
+
   // ---- playback ----
   let ctx = null;
   let off = false; // turned off in settings while the page is open
@@ -370,26 +439,15 @@
       this.el = el;
       this.feed = null;
       this.sources = new Set();
-      this.live = false; // this player owns the element's audio: its track is off, or about to be
-      this.owned = []; // tracks switched off here
+      this.live = false; // this player owns the element's audio: the element is turned down, or about to be
       this.takeover = 0;
       this.handoff = 0;
-      this.reset();
       this.gain = ctx.createGain();
       this.compressor = new DynamicsCompressorNode(ctx, { threshold: -50, knee: 40, ratio: 12, attack: 0, release: 0.25 });
       this.gain.connect(this.compressor);
+      this.mix = null;
+      this.reset();
       this.volume();
-      const tracks = el.audioTracks;
-      if (tracks) {
-        // The page re-enabling or switching a track takes the audio back; a track appearing for the
-        // same stream (new init segment) stays with the copy.
-        tracks.addEventListener("change", () => {
-          if (this.live && !this.takeover && Array.from(tracks).some((t) => t.enabled)) { this.owned = []; this.native(); }
-        });
-        tracks.addEventListener("addtrack", (e) => {
-          if (this.live && !this.takeover && e.track.enabled) { e.track.enabled = false; this.owned.push(e.track); }
-        });
-      }
     }
     volume() {
       if (this.handoff) return;
@@ -399,8 +457,20 @@
     }
     reset() {
       this.gen = (this.gen || 0) + 1;
-      for (const s of this.sources) { s.onended = null; s.stop(); s.disconnect(); }
-      this.sources.clear();
+      // Sources still sounding fade out on their own mix, so a restart never cuts the wave mid-cycle;
+      // the next run gets a fresh mix that ramps in (place()).
+      if (this.sources.size) {
+        const old = this.mix, g = old.gain, t = ctx.currentTime;
+        g.cancelScheduledValues(t);
+        g.setValueAtTime(g.value, t);
+        g.linearRampToValueAtTime(0, t + FADE);
+        for (const s of this.sources) { s.onended = null; s.stop(t + FADE); }
+        this.sources.clear();
+        setTimeout(() => old.disconnect(), (FADE + 0.05) * 1000);
+        this.mix = null;
+      }
+      if (!this.mix) { this.mix = ctx.createGain(); this.mix.connect(this.gain); }
+      this.rampIn = true;
       for (const p of this.parts || []) p.close();
       this.parts = [];
       this.queue = []; // scheduled spans {c: context time, m: media time, rate, d: duration}
@@ -417,9 +487,11 @@
         this.feed = set && set.size === 1 ? [...set][0] : null; // one audio SourceBuffer only
       }
       const config = this.feed && this.feed.config;
+      // A muted page has nothing to compress (YouTube's muted previews): leave it native until it isn't.
       return !!config && this.supported(config) && !this.failed && !el.mediaKeys && !el.webkitKeys &&
         el.playbackRate === 1 && ctx.state === "running" && !!el.audioTracks &&
-        (this.live || Array.from(el.audioTracks).filter((t) => t.enabled).length === 1) && !off;
+        Array.from(el.audioTracks).filter((t) => t.enabled).length === 1 &&
+        (this.live || (!el.muted && el.volume > 0)) && !off;
     }
     supported(config) {
       const key = config.codec + "/" + config.sampleRate + "/" + config.numberOfChannels;
@@ -438,7 +510,7 @@
     tick() {
       const el = this.el;
       if (this.handoff) return;
-      // Short pauses keep the element's track off so playback resumes straight into the copy.
+      // Short pauses keep the element muted so playback resumes straight into the copy.
       if (el.paused && !el.ended && this.live && performance.now() - this.pausedAt < PAUSE_GRACE) return;
       if (el.paused || el.ended || !this.usable()) return this.native();
       if (el.seeking || el.readyState < 3) { this.reset(); return; }
@@ -448,10 +520,12 @@
         else if (performance.now() - this.dryAt > 1000) return this.native();
       }
       const now = el.currentTime;
-      // Packets already handed to the decoder were replaced or removed: start over from the playhead.
-      if (this.feed.changed !== Infinity) {
-        if (this.cursor !== null && this.feed.changed <= this.cursor) this.reset();
-        this.feed.changed = Infinity;
+      // Packets handed to the decoder and not yet heard were replaced or removed: start over from
+      // the playhead. Changes wholly behind it (a page evicting what it played) don't matter.
+      const feed = this.feed;
+      if (feed.changedFrom !== Infinity) {
+        if (this.cursor !== null && feed.changedFrom <= this.cursor && feed.changedTo > now) this.reset();
+        feed.settle();
       }
       if (this.next !== null) {
         const heard = this.heard() - LOOKAHEAD;
@@ -498,10 +572,13 @@
     }
     flush() {
       const parts = this.parts;
-      if (!parts.length) return;
+      // The decoder trims its first output after a (re)configure (Opus pre-skip), so a run starts
+      // where the second packet's timestamp says the first one ends: a lone first part waits for it.
+      if (!parts.length || (parts.length === 1 && this.next === null)) return;
       this.parts = [];
-      const media = parts[0].timestamp / 1e6, channels = parts[0].numberOfChannels;
-      const buffer = ctx.createBuffer(channels, parts.reduce((n, p) => n + p.numberOfFrames, 0), parts[0].sampleRate);
+      const rate = parts[0].sampleRate, channels = parts[0].numberOfChannels;
+      const media = parts[1] ? parts[1].timestamp / 1e6 - parts[0].numberOfFrames / rate : parts[0].timestamp / 1e6;
+      const buffer = ctx.createBuffer(channels, parts.reduce((n, p) => n + p.numberOfFrames, 0), rate);
       let at = 0;
       for (const p of parts) {
         for (let c = 0; c < channels; c++) {
@@ -519,11 +596,22 @@
         : this.next + (media - this.nextMedia) / this.trimRate;
       let offset = 0;
       if (when < soonest) { offset = (soonest - when) * this.trimRate; when = soonest; }
+      // Whole sample frames at both ends: at 1× a buffer started between frames is resampled
+      // (linear interpolation) for its whole length; on frames it is a straight copy.
+      when = Math.round(when * ctx.sampleRate) / ctx.sampleRate;
+      offset = Math.round(offset * buffer.sampleRate) / buffer.sampleRate;
       if (offset >= buffer.duration) return;
+      if (this.rampIn) {
+        const g = this.mix.gain;
+        g.cancelScheduledValues(ctx.currentTime);
+        g.setValueAtTime(0, when);
+        g.linearRampToValueAtTime(1, when + FADE);
+        this.rampIn = false;
+      }
       const src = ctx.createBufferSource();
       src.buffer = buffer;
       src.playbackRate.value = this.trimRate;
-      src.connect(this.gain);
+      src.connect(this.mix);
       src.onended = () => { this.sources.delete(src); src.disconnect(); };
       src.start(when, offset);
       this.sources.add(src);
@@ -533,29 +621,25 @@
       this.nextMedia = media + buffer.duration;
       if (!this.live) this.silence(when);
     }
-    // Switch the element's (single enabled) audio track off as the copy becomes audible.
+    // Turn the element down as the copy becomes audible.
     silence(when) {
       this.live = true;
-      this.takeover = setTimeout(() => {
-        this.takeover = 0;
-        const on = Array.from(this.el.audioTracks).filter((t) => t.enabled);
-        if (on.length !== 1) { this.native(); return; }
-        this.owned = on;
-        on[0].enabled = false;
-      }, Math.max(0, (when - ctx.currentTime) * 1000));
+      this.takeover = setTimeout(() => { this.takeover = 0; hush(this.el); }, Math.max(0, (when - ctx.currentTime) * 1000));
     }
-    // Native audio back. While its renderer restarts (~0.4 s) the copy fades out underneath.
+    // Native audio back. Its volume returns at once, so the copy only fades out over it.
     native() {
       if (!this.live) { if (!this.handoff) this.reset(); return; }
       this.live = false;
       clearTimeout(this.takeover);
       this.takeover = 0;
-      for (const t of this.owned) t.enabled = true;
-      this.owned = [];
-      this.gen++; // late decoder output must not schedule (and take the track) again
+      unhush(this.el);
+      this.gen++; // late decoder output must not schedule (and turn the element down) again
       if (this.el.paused || !this.sources.size) { this.reset(); return; }
-      this.gain.gain.setTargetAtTime(0, ctx.currentTime, 0.15);
-      this.handoff = setTimeout(() => { this.handoff = 0; this.reset(); this.volume(); }, 500);
+      const g = this.gain.gain, t = ctx.currentTime;
+      g.cancelScheduledValues(t);
+      g.setValueAtTime(g.value, t);
+      g.linearRampToValueAtTime(0, t + HANDOFF);
+      this.handoff = setTimeout(() => { this.handoff = 0; this.reset(); this.volume(); }, HANDOFF * 1000 + 50);
     }
   }
 
@@ -567,8 +651,13 @@
     if (!players.size) { clearInterval(timer); timer = 0; if (ctx.state === "running") ctx.suspend(); }
   };
   const attach = (el) => {
-    if (off || !feeds.has(sourceFor(el))) return;
-    if (!ctx) ctx = new AudioContext({ latencyHint: "playback" });
+    const set = off ? null : feeds.get(sourceFor(el));
+    if (!set) return;
+    // At the stream's own rate the context plays decoded buffers as they are; WebKit converts to the
+    // output device's rate once, at the destination, rather than each buffer source interpolating.
+    // A container's rate below 44.1 kHz can be HE-AAC's core rate, not what the decoder puts out.
+    const rate = set.size === 1 ? [...set][0].config?.sampleRate : undefined;
+    if (!ctx) ctx = new AudioContext(rate >= 44100 ? { latencyHint: "playback", sampleRate: rate } : { latencyHint: "playback" });
     if (ctx.state !== "running") ctx.resume().catch(() => {});
     let p = byElement.get(el);
     if (!p) byElement.set(el, (p = new Player(el)));
@@ -581,7 +670,7 @@
     if (e.type === "playing") attach(el);
     const p = byElement.get(el);
     if (!p) return;
-    if (e.type === "volumechange") p.volume();
+    if (e.type === "volumechange") { resync(el); p.volume(); }
     else if (e.type === "emptied") { p.native(); p.feed = null; p.failed = false; }
     else if (e.type === "pause") { if (p.live) { p.reset(); p.pausedAt = performance.now(); } else p.native(); }
     else if (e.type === "ratechange" && el.playbackRate !== 1) p.native();
@@ -594,6 +683,11 @@
   // With autoplay blocked, WebKit starts an AudioContext only within a user activation.
   const activate = () => { if (ctx && ctx.state === "suspended" && players.size) ctx.resume().catch(() => {}); };
   for (const type of ["pointerdown", "keydown"]) window.addEventListener(type, activate, true);
-  // Sent by angl when Night audio is switched off: native audio returns without a reload.
-  window.addEventListener("anglnightaudiooff", () => { off = true; for (const p of players) p.native(); }, { once: true });
+  // Sent by angl when Night audio is switched off or back on: the open page follows without a reload.
+  // Appends are mirrored while off, so a video already playing is picked up where it is.
+  window.addEventListener("anglnightaudiooff", () => { off = true; for (const p of players) p.native(); });
+  window.addEventListener("anglnightaudioon", () => {
+    off = false;
+    for (const el of document.querySelectorAll("video, audio")) if (!el.paused && !el.ended) attach(el);
+  });
 })();

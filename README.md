@@ -114,9 +114,12 @@ ticket. Tags are `vVERSION` and match `VERSION`.
   video (YouTube, Twitch) with Web Audio's `DynamicsCompressorNode` at FrankerFaceZ's defaults
   (threshold −50 dB, knee 40, ratio 12, release 0.25 s). WebKit outputs silence when a page routes
   MediaSource video through Web Audio (FFZ's approach), so a page script decodes the audio the
-  site appends with WebCodecs, plays it compressed in sync with the video and turns the video's
-  own audio track off. No permissions; everything stays in the page. Switching it on applies from
-  the next page load; switching it off takes effect at once.
+  site appends with WebCodecs, plays it compressed in sync with the video at the stream's own sample
+  rate and turns the video's own audio down to −120 dB meanwhile (the page still sees its own
+  volume; switching the track off starves the player's audio buffer, and a muted video pauses in a
+  hidden tab). No permissions; everything stays in the page. Switching it off takes effect at once;
+  switching it on takes effect in an open page from its next video (a page that already had it
+  resumes at once).
 - **Video full screen** (Settings › Pages & media › Media): a page's full-screen button (YouTube,
   Twitch, any HTML5 player) fills the screen at once, in the current Space, with no macOS
   full-screen animation: the window goes borderless over the whole screen (below the notch), the
@@ -255,9 +258,10 @@ Profiles are separate instances: `open -na angl --args --profile NAME`.
   audio/video elements (not WebAudio or detached `Audio()` objects); mute covers everything.
 - Night audio covers Media Source video with one audio stream at 1× speed. Other media
   (progressive files, native HLS, page Web Audio), DRM, Media Source in workers, other speeds and
-  codecs WebCodecs can't decode play uncompressed; the switch back fades over about half a second.
+  codecs WebCodecs can't decode play uncompressed; the switch back is immediate.
   Compression is per video, not one mix of the tab. Per-site volume is applied before compression.
-  WebKit starts the audio context only after a click or key press on the page.
+  WebKit starts the audio context only after a click or key press on the page. The audio context's
+  rate follows the page's first stream; a later stream at another rate is resampled.
 - YouTube video stills are YouTube's own picks, not the midpoint (measured at 25–39 % into the
   video): an exact frame needs a watch-page fetch per video for the storyboard, which tops out at
   320×180. Live streams, Shorts, the watch page's player image and brand-new uploads whose stills

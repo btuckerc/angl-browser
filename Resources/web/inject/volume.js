@@ -93,11 +93,16 @@
     else scan();
   };
   watch();
+  // Night audio (page world) holds an element's real volume far down while it plays a copy, and caps
+  // the page's own volume writes there as the listener above would; it asks for the factor at start.
+  const announce = () => window.dispatchEvent(new CustomEvent("anglvolumefactor", { detail: factor }));
+  window.addEventListener("anglvolumequery", announce);
 
   window.__anglVolume = {
     set(f, m) {
       factor = f;
       muted = m;
+      announce();
       scan();
       for (const el of tracked) apply(el);
       if (!muted) {
