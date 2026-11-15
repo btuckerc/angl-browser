@@ -610,9 +610,10 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
         autoPictureInPicture = false
         if webView.window == nil { owner.activate(self) }
         guard let window = owner.window else { return }
+        if NSApp.isHidden { NSApp.unhide(nil) }
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
-        NSApp.activate()
+        AppDelegate.bringForward()
     }
 
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,

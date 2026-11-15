@@ -73,8 +73,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // bringForward's own reopen event: the window it is bringing back may still be deminiaturizing.
+        if !flag, Date() < AppDelegate.selfOpenUntil { return false }
         if !flag, let b = Browser.shared { if b.windows.isEmpty { b.newWindow() } else { b.windows.last?.showWindow(nil) } }
         return true
+    }
+
+    private static var selfOpenUntil = Date.distantPast
+
+    /// Brings angl forward for a click another process received: the Picture in Picture window
+    /// belongs to PIPAgent, so the frontmost app keeps activation and NSApp.activate() is ignored.
+    /// LaunchServices activates angl as `open -a angl` does; with another profile's angl running it
+    /// can't tell the two apart, so that case falls back to the forced activation macOS 14 deprecated.
+    static func bringForward() {
+        guard !NSApp.isActive else { return }
+        NSApp.activate()
+        let me = NSRunningApplication.current
+        let instances = NSRunningApplication.runningApplications(withBundleIdentifier: me.bundleIdentifier ?? "")
+        guard instances == [me] else {
+            (NSApp as LegacyActivation).activate(ignoringOtherApps: true)
+            return
+        }
+        let cfg = NSWorkspace.OpenConfiguration()
+        cfg.activates = true
+        cfg.addsToRecentItems = false
+        cfg.promptsUserIfNeeded = false
+        selfOpenUntil = Date().addingTimeInterval(2)
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: cfg)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -100,3 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateLater
     }
 }
+
+/// NSApplication.activate(ignoringOtherApps:) through a protocol, so the deprecated call doesn't warn.
+@MainActor private protocol LegacyActivation { func activate(ignoringOtherApps: Bool) }
+extension NSApplication: LegacyActivation {}
