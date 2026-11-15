@@ -136,6 +136,10 @@ final class PaletteView: FlatView, NSTextFieldDelegate {
             list.move(selector == #selector(NSResponder.moveDown(_:)) ? 1 : -1)
             if !tabChooser, let s = list.current { owner.preconnect(s.preconnect, newTab: newTab) }
             return true
+        case #selector(NSResponder.moveRight(_:)):
+            guard !tabChooser, OmniboxEditing.takeIntoField(list.keyed ? list.current : nil, field: field) else { return false }
+            refresh()
+            return true
         case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)):
             if let s = list.current {
                 if tabChooser { s.act(.current) } else { run(s, disposition()) }

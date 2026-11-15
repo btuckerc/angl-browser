@@ -78,8 +78,9 @@ ticket. Tags are `vVERSION` and match `VERSION`.
   command. Commands whose title starts with what you typed come first; Tab 1… and Space 1…
   come last unless you type a digit.
   Return opens here, ⌘Return as a child tab, ⇧Return in a new window. Lists longer than
-  eight rows scroll, and ↑ ↓ reach every match; an open tab hides the same page's history
-  and bookmark rows. An empty tab holds the same field in the page, next to the
+  eight rows scroll, and ↑ ↓ reach every match; → then puts the row's address in the field
+  to edit before Return, as in Chrome. An open tab hides the same page's history and
+  bookmark rows. An empty tab holds the same field in the page, next to the
   `angl` wordmark, with a blinking accent block for a caret; Esc clears it, then lets go.
   Appearance › Empty tab › Wordmark only turns that off, and Empty-tab caret › System keeps
   the field with the system caret (`"window": {"newTab": "mark"}`, `{"caret": "native"}`).

@@ -214,6 +214,11 @@ final class NavBar: FlatView, NSTextFieldDelegate {
             suggestions.move(selector == #selector(NSResponder.moveDown(_:)) ? 1 : -1)
             owner.preconnect(suggestions.selected?.preconnect, newTab: false)
             return true
+        case #selector(NSResponder.moveRight(_:)):
+            guard OmniboxEditing.takeIntoField(suggestions.keyed, field: field) else { return false }
+            typed = true
+            refreshSuggestions()
+            return true
         case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)):
             let flags = NSApp.currentEvent?.modifierFlags ?? []
             let d: Disposition = flags.contains(.shift) ? .newWindow : flags.contains(.command) ? .childTab : .current
@@ -279,6 +284,8 @@ struct Suggestion {
     /// Where the row navigates, when that is worth warming a connection to before it's picked:
     /// searches, visited pages and bookmarks, not arbitrary text that merely looks like a host.
     var preconnect: URL? = nil
+    /// What → puts in the field to edit once ↑ ↓ picked the row: its address. Nil keeps → a caret move.
+    var edit: String? = nil
     var act: @MainActor (NavBar.Disposition) -> Void
 
     var glyph: String {
@@ -382,19 +389,22 @@ enum Suggestions {
     private static func tab(_ n: TabNode, _ ws: Workspace, _ w: BrowserWindowController) -> Suggestion {
         Suggestion(kind: .tab, title: n.title.isEmpty ? "New Tab" : n.title,
                    detail: n.url.map(Omnibox.display) ?? "", hint: "■",
-                   hintColor: w.style.workspaceColor(ws.color)) { [weak w] _ in if let w { w.activate(w.tab(n)) } }
+                   hintColor: w.style.workspaceColor(ws.color), edit: n.url?.absoluteString) { [weak w] _ in
+            if let w { w.activate(w.tab(n)) }
+        }
     }
 
     private static func history(_ h: HistoryItem, _ w: BrowserWindowController) -> Suggestion {
         Suggestion(kind: .history, title: h.title.isEmpty ? h.url : h.title,
-                   detail: URL(string: h.url).map(Omnibox.display) ?? h.url, hint: "", preconnect: URL(string: h.url)) { [weak w] d in
+                   detail: URL(string: h.url).map(Omnibox.display) ?? h.url, hint: "", preconnect: URL(string: h.url), edit: h.url) { [weak w] d in
             if let u = URL(string: h.url) { w?.go(u, disposition: d) }
         }
     }
 
     private static func archive(_ record: RecoveryRecord, _ w: BrowserWindowController) -> Suggestion {
         Suggestion(kind: .archive, title: record.saved.title.isEmpty ? (record.saved.url ?? "New Tab") : record.saved.title,
-                   detail: record.saved.url.flatMap(URL.init(string:)).map(Omnibox.display) ?? "", hint: "↩") { [weak w] _ in
+                   detail: record.saved.url.flatMap(URL.init(string:)).map(Omnibox.display) ?? "", hint: "↩",
+                   edit: record.saved.url) { [weak w] _ in
             guard w?.restore(record) == true else { return }
             _ = Browser.shared.history?.deleteRecovery(id: record.id)
         }
@@ -404,7 +414,7 @@ enum Suggestions {
         guard let s = bm.url, let u = URL(string: s) else { return nil }
         return Suggestion(kind: .bookmark, title: bm.title, detail: Omnibox.display(u), hint: "",
                           menu: { [weak w] in w.map { BookmarkMenu.make(bm, $0) } ?? NSMenu() },
-                          preconnect: u) { [weak w] d in w?.go(u, disposition: d) }
+                          preconnect: u, edit: u.absoluteString) { [weak w] d in w?.go(u, disposition: d) }
     }
 }
 
@@ -427,6 +437,16 @@ enum OmniboxEditing {
         close()
         suggestion.act(disposition)
     }
+
+    /// → on a row ↑ ↓ picked (Chrome's way): its address replaces the field's text with the caret at
+    /// the end, to edit before ↩. The caller refreshes the rows for the new text. False: an ordinary →.
+    static func takeIntoField(_ suggestion: Suggestion?, field: NSTextField) -> Bool {
+        guard let text = suggestion?.edit, text != field.stringValue, let editor = field.currentEditor() else { return false }
+        field.stringValue = text
+        editor.selectedRange = NSRange(location: (text as NSString).length, length: 0)
+        editor.scrollRangeToVisible(editor.selectedRange)
+        return true
+    }
 }
 
 /// Borderless drop-down under the URL field. Never takes key focus; the field keeps typing.
@@ -440,6 +460,8 @@ final class SuggestionsPanel {
 
     var isVisible: Bool { panel?.isVisible ?? false }
     var selected: Suggestion? { isVisible ? list.current : nil }
+    /// The selected row, if ↑ ↓ chose it.
+    var keyed: Suggestion? { isVisible && list.keyed ? list.current : nil }
 
     func show(_ items: [Suggestion], below rect: NSRect, parent: NSWindow?) {
         let p = panel ?? makePanel()
@@ -490,7 +512,7 @@ final class SuggestionList: NSView {
     var style: Style?
     var items: [Suggestion] = [] {
         didSet {
-            top = 0; wheel = 0; selected = 0; needsDisplay = true
+            top = 0; wheel = 0; selected = 0; keyed = false; needsDisplay = true
             // Rebuilt when an AX client next asks, not on every keystroke.
             if axRows != nil { axRows = nil; NSAccessibility.post(element: self, notification: .layoutChanged) }
         }
@@ -507,6 +529,8 @@ final class SuggestionList: NSView {
     }
     var onPick: ((Int) -> Void)?
     var current: Suggestion? { items.indices.contains(selected) ? items[selected] : nil }
+    /// ↑ ↓ chose the selection, rather than the list's default first row or the pointer.
+    private(set) var keyed = false
     /// The first row on screen.
     private var top = 0
     /// Scroll-wheel travel not yet worth a whole row.
@@ -532,6 +556,7 @@ final class SuggestionList: NSView {
     func move(_ delta: Int) {
         guard !items.isEmpty else { return }
         selected = (selected + delta + items.count) % items.count
+        keyed = true
         if NSWorkspace.shared.isVoiceOverEnabled, let item = current {
             NSAccessibility.post(element: self, notification: .announcementRequested,
                                  userInfo: [.announcement: item.accessibilityLabel,
@@ -557,7 +582,7 @@ final class SuggestionList: NSView {
 
     override func mouseMoved(with event: NSEvent) {
         let r = row(at: convert(event.locationInWindow, from: nil))
-        if items.indices.contains(r) { selected = r }
+        if items.indices.contains(r), r != selected { selected = r; keyed = false }
     }
 
     override func scrollWheel(with event: NSEvent) {
