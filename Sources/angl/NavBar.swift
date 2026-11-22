@@ -1,5 +1,6 @@
 import AnglCore
 import AppKit
+import CoreText
 
 /// The 36 px bar: traffic-light gap, sidebar toggle, back/forward/reload, URL field (which is also
 /// the command palette), new tab.
@@ -466,7 +467,7 @@ final class SuggestionsPanel {
             if let p = panel, let s = style {
                 applyPanelSurface(p, body: list, style: s)
                 if isVisible, let rect = anchor?(), !rect.isEmpty {
-                    let h = SuggestionList.height(for: items.count)
+                    let h = SuggestionList.height(for: items.count, embedded: false, rounded: s.radius > 0)
                     let gap: CGFloat = s.radius > 0 || s.glass ? 4 : -1
                     let nextFrame = NSRect(x: rect.minX, y: rect.minY - h - gap, width: rect.width, height: h)
                     if p.frame != nextFrame { p.setFrame(nextFrame, display: true); p.invalidateShadow() }
@@ -487,7 +488,7 @@ final class SuggestionsPanel {
     func show(_ items: [Suggestion], below rect: NSRect, parent: NSWindow?) {
         let wasVisible = isVisible
         let p = panel ?? makePanel()
-        let h = SuggestionList.height(for: items.count)
+        let h = SuggestionList.height(for: items.count, embedded: false, rounded: (style?.radius ?? 0) > 0)
         let gap: CGFloat = (style?.radius ?? 0) > 0 || (style?.glass ?? false) ? 4 : -1
         let nextFrame = NSRect(x: rect.minX, y: rect.minY - h - gap, width: rect.width, height: h)
         let resized = p.frame != nextFrame
@@ -535,6 +536,8 @@ final class SuggestionsPanel {
 final class SuggestionList: NSView {
     static let rowHeight: CGFloat = 28
     static let visible = 8
+    /// Top and bottom padding when rounded: 4 pt + 1 pt pill dy = 5 pt, matching `fillRowPill`'s 5 pt horizontal inset.
+    static let verticalPadding: CGFloat = 4
     /// True when hosted inside `PaletteView`, which owns the outer surface and border.
     var embedded = false
     var style: Style?
@@ -566,8 +569,17 @@ final class SuggestionList: NSView {
     /// VoiceOver sees one element per row; kept here because AX doesn't retain them. Nil until asked for.
     private var axRows: [PressableElement]?
 
-    /// The list's height for `count` rows: the visible ones plus the 1 pt border.
-    static func height(for count: Int) -> CGFloat { CGFloat(min(count, visible)) * rowHeight + 2 }
+    private var padY: CGFloat { (style?.radius ?? 0) > 0 ? Self.verticalPadding : 0 }
+    private var rowsTop: CGFloat { 1 + padY }
+
+    /// The list's height for `count` rows: 0 when empty, otherwise visible rows plus chrome (1 pt divider
+    /// when embedded, 2 pt top/bottom border when standalone) and symmetric rounded padding.
+    static func height(for count: Int, embedded: Bool = false, rounded: Bool = true) -> CGFloat {
+        guard count > 0 else { return 0 }
+        let chrome: CGFloat = embedded ? 1 : 2
+        let pad: CGFloat = rounded ? verticalPadding * 2 : 0
+        return CGFloat(min(count, visible)) * rowHeight + chrome + pad
+    }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -598,7 +610,9 @@ final class SuggestionList: NSView {
     }
 
     private func rowRect(_ i: Int) -> NSRect {
-        NSRect(x: 1, y: 1 + CGFloat(i - top) * Self.rowHeight, width: bounds.width - 2, height: Self.rowHeight)
+        let insetX: CGFloat = embedded ? 0 : 1
+        return NSRect(x: insetX, y: rowsTop + CGFloat(i - top) * Self.rowHeight,
+                      width: bounds.width - insetX * 2, height: Self.rowHeight)
     }
 
     override func updateTrackingAreas() {
@@ -606,7 +620,10 @@ final class SuggestionList: NSView {
         addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseMoved, .activeAlways, .inVisibleRect], owner: self))
     }
 
-    private func row(at p: NSPoint) -> Int { top + Int((p.y - 1) / SuggestionList.rowHeight) }
+    private func row(at p: NSPoint) -> Int {
+        guard p.y >= rowsTop else { return -1 }
+        return top + Int(floor((p.y - rowsTop) / Self.rowHeight))
+    }
 
     override func mouseMoved(with event: NSEvent) {
         let r = row(at: convert(event.locationInWindow, from: nil))
@@ -663,8 +680,29 @@ final class SuggestionList: NSView {
         layoutAccessibility()
     }
 
+    /// Draws a single line truncated at `width` with its baseline pinned exactly to `baseline`
+    /// so mixed fonts (UI title + mono URL + hint) sit at a uniform vertical height.
+    private func drawBaselineLine(_ full: CTLine, attrs: [NSAttributedString.Key: Any],
+                                  x: CGFloat, maxWidth: CGFloat, baseline: CGFloat, in cg: CGContext) {
+        guard maxWidth > 0 else { return }
+        let line: CTLine
+        if CGFloat(CTLineGetTypographicBounds(full, nil, nil, nil)) > maxWidth {
+            let token = CTLineCreateWithAttributedString(NSAttributedString(string: "…", attributes: attrs))
+            guard let truncated = CTLineCreateTruncatedLine(full, Double(maxWidth), .end, token) else { return }
+            line = truncated
+        } else {
+            line = full
+        }
+        cg.saveGState()
+        cg.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
+        cg.textPosition = CGPoint(x: x, y: baseline)
+        CTLineDraw(line, cg)
+        cg.restoreGState()
+    }
+
     override func draw(_ dirtyRect: NSRect) {
-        guard let s = style else { return }
+        guard let s = style, let cg = NSGraphicsContext.current?.cgContext else { return }
+        let scale = window?.backingScaleFactor ?? 2
         let rOuter = min(s.radius, min(bounds.width, bounds.height) / 2)
         if !embedded, !s.glass {
             s.raised.setFill()
@@ -681,37 +719,38 @@ final class SuggestionList: NSView {
                 fillRowPill(r, fill: s.selected, bar: s.accent, radius: s.smallRadius)
             }
             if let img = s.symbol(item.glyph, tint: s.secondary) {
-                img.draw(in: NSRect(x: 10, y: y + (r.height - img.size.height) / 2, width: img.size.width, height: img.size.height))
+                img.draw(in: NSRect(x: r.minX + 12, y: y + (r.height - img.size.height) / 2, width: img.size.width, height: img.size.height))
             }
+            // One shared baseline centred on the UI font's cap height keeps title, URL and hint level.
+            let baseline = ((y + (r.height + s.ui.capHeight) / 2) * scale).rounded() / scale
             var hintW: CGFloat = 0
             if !item.hint.isEmpty {
-                let attrs: [NSAttributedString.Key: Any] = [.font: s.monoSmall, .foregroundColor: item.hintColor ?? s.muted]
-                let size = (item.hint as NSString).size(withAttributes: attrs)
-                hintW = size.width + 16
-                (item.hint as NSString).draw(at: NSPoint(x: r.maxX - size.width - 10, y: y + (r.height - size.height) / 2), withAttributes: attrs)
+                let hAttrs: [NSAttributedString.Key: Any] = [.font: s.monoSmall, .foregroundColor: item.hintColor ?? s.muted]
+                let hLine = CTLineCreateWithAttributedString(NSAttributedString(string: item.hint, attributes: hAttrs))
+                let hw = ceil(CGFloat(CTLineGetTypographicBounds(hLine, nil, nil, nil)))
+                hintW = hw + 16
+                drawBaselineLine(hLine, attrs: hAttrs, x: r.maxX - hw - 12, maxWidth: hw + 1, baseline: baseline, in: cg)
             }
-            let textX: CGFloat = 32
-            let avail = r.maxX - textX - hintW - 8
-            let title = NSAttributedString(string: item.title, attributes: [.font: s.ui, .foregroundColor: s.primary])
-            let titleW = min(title.size().width, item.detail.isEmpty ? avail : avail * 0.55)
-            let para = NSMutableParagraphStyle()
-            para.lineBreakMode = .byTruncatingTail
-            let tAttrs: [NSAttributedString.Key: Any] = [.font: s.ui, .foregroundColor: s.primary, .paragraphStyle: para]
-            let lineH = s.ui.boundingRectForFont.height
-            (item.title as NSString).draw(in: NSRect(x: textX, y: y + (r.height - lineH) / 2, width: titleW, height: lineH), withAttributes: tAttrs)
+            let textX = r.minX + 32
+            let avail = r.maxX - textX - hintW - 12
+            let tAttrs: [NSAttributedString.Key: Any] = [.font: s.ui, .foregroundColor: s.primary]
+            let tLine = CTLineCreateWithAttributedString(NSAttributedString(string: item.title, attributes: tAttrs))
+            let naturalTitleW = ceil(CGFloat(CTLineGetTypographicBounds(tLine, nil, nil, nil)))
+            let titleW = min(naturalTitleW, item.detail.isEmpty ? avail : avail * 0.55)
+            drawBaselineLine(tLine, attrs: tAttrs, x: textX, maxWidth: titleW, baseline: baseline, in: cg)
             if !item.detail.isEmpty {
-                let dAttrs: [NSAttributedString.Key: Any] = [.font: s.monoSmall, .foregroundColor: s.secondary, .paragraphStyle: para]
-                let dh = s.monoSmall.boundingRectForFont.height
+                let dAttrs: [NSAttributedString.Key: Any] = [.font: s.monoSmall, .foregroundColor: s.secondary]
+                let dLine = CTLineCreateWithAttributedString(NSAttributedString(string: item.detail, attributes: dAttrs))
                 let dx = textX + titleW + 10
-                (item.detail as NSString).draw(in: NSRect(x: dx, y: y + (r.height - dh) / 2, width: max(0, avail - titleW - 10), height: dh),
-                                               withAttributes: dAttrs)
+                drawBaselineLine(dLine, attrs: dAttrs, x: dx, maxWidth: max(0, avail - titleW - 10), baseline: baseline, in: cg)
             }
         }
         // More rows than fit: a thumb on the right edge says where the view is.
         if items.count > Self.visible {
-            let track = bounds.height - 2, n = CGFloat(items.count)
+            let trackBottom = bounds.height - padY - (embedded ? 0 : 1)
+            let track = max(0, trackBottom - rowsTop), n = CGFloat(items.count)
             s.border.setFill()
-            NSRect(x: bounds.width - 4, y: 1 + track * CGFloat(top) / n, width: 2, height: track * CGFloat(Self.visible) / n).fill()
+            NSRect(x: bounds.width - 4, y: rowsTop + track * CGFloat(top) / n, width: 2, height: track * CGFloat(Self.visible) / n).fill()
         }
         if !embedded, !s.glass {
             s.border.setStroke()

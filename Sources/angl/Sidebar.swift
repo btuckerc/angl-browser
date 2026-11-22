@@ -554,10 +554,24 @@ final class TabOutlineView: NSOutlineView {
         MainActor.assumeIsolated { owner?.close(node: n, subtree: false) }
     }
 
+    private var roundedRows: Bool { (sidebar?.style.smallRadius ?? 0) > 0 }
+
     override func frameOfOutlineCell(atRow row: Int) -> NSRect {
-        var r = super.frameOfOutlineCell(atRow: row)
-        r.origin.x = max(0, r.origin.x - 2)
-        return r
+        guard row >= 0, row < numberOfRows, let item = item(atRow: row), isExpandable(item) else { return .zero }
+        let rowRect = rect(ofRow: row)
+        let indentX = CGFloat(level(forRow: row)) * indentationPerLevel
+        let baseX: CGFloat = roundedRows ? 8 : 4
+        return NSRect(x: baseX + indentX, y: rowRect.minY, width: 12, height: rowRect.height)
+    }
+
+    override func frameOfCell(atColumn column: Int, row: Int) -> NSRect {
+        guard column == 0, row >= 0, row < numberOfRows else { return super.frameOfCell(atColumn: column, row: row) }
+        let rowRect = rect(ofRow: row)
+        let indentX = CGFloat(level(forRow: row)) * indentationPerLevel
+        let expandable = item(atRow: row).map { isExpandable($0) } ?? false
+        let baseX: CGFloat = roundedRows ? (expandable ? 21 : 12) : (expandable ? 17 : 8)
+        let x = baseX + indentX
+        return NSRect(x: x, y: rowRect.minY, width: max(0, rowRect.width - x), height: rowRect.height)
     }
 
     override func validateProposedFirstResponder(_ responder: NSResponder, for event: NSEvent?) -> Bool { true }
@@ -648,17 +662,31 @@ final class TabCell: NSTableCellView {
     override func layout() {
         super.layout()
         let h = bounds.height
-        icon.frame = NSRect(x: 2, y: (h - 14) / 2, width: 14, height: 14)
-        let right: CGFloat = 20
+        let rounded = (sidebar?.style.smallRadius ?? 0) > 0
+        // Pill insets by 5 pt on each side when rounded, so trail = 10 leaves 5 pt inside the pill
+        // (matching the 3 pt vertical button inset and keeping the × glyph optically balanced with the favicon).
+        let trail: CGFloat = rounded ? 10 : 6
+        icon.frame = NSRect(x: 0, y: (h - 14) / 2, width: 14, height: 14)
         close.isHidden = !hovering
-        close.frame = NSRect(x: bounds.width - right, y: (h - 16) / 2, width: 16, height: 16)
         badge.isHidden = hovering || badge.stringValue.isEmpty
-        let bw: CGFloat = badge.isHidden ? 0 : 26
-        badge.frame = NSRect(x: bounds.width - bw - 4, y: (h - 14) / 2, width: bw, height: 14)
-        audio.frame = NSRect(x: bounds.width - right - bw - 14, y: (h - 12) / 2, width: 12, height: 12)
-        let titleRight = hovering ? right + 2 : bw + 6 + (audio.isHidden ? 0 : 16)
+        var cursor = bounds.width - trail
+        if hovering {
+            close.frame = NSRect(x: cursor - 16, y: (h - 16) / 2, width: 16, height: 16)
+            cursor = close.frame.minX - 4
+        } else if !badge.isHidden {
+            let bw = min(30, ceil(badge.intrinsicContentSize.width))
+            let bh = ceil(badge.intrinsicContentSize.height)
+            badge.frame = NSRect(x: cursor - bw, y: (h - bh) / 2, width: bw, height: bh)
+            cursor = badge.frame.minX - 4
+        }
+        if !audio.isHidden {
+            audio.frame = NSRect(x: cursor - 12, y: (h - 12) / 2, width: 12, height: 12)
+            cursor = audio.frame.minX - 4
+        }
+        let hasTrailing = hovering || !badge.isHidden || !audio.isHidden
+        let titleMaxX = hasTrailing ? cursor - 2 : bounds.width - trail
         let th = ceil(title.intrinsicContentSize.height)
-        title.frame = NSRect(x: 22, y: (h - th) / 2, width: max(0, bounds.width - 22 - titleRight), height: th)
+        title.frame = NSRect(x: 20, y: (h - th) / 2, width: max(0, titleMaxX - 20), height: th)
     }
 }
 
@@ -884,21 +912,25 @@ final class PinnedRows: NSView, NSViewToolTipOwner {
                 if active {
                     fillRowPill(r, fill: s.selected, bar: s.accent, radius: s.smallRadius)
                 }
+                let rounded = s.smallRadius > 0
+                let leftX: CGFloat = rounded ? 12 : 8
+                let trail: CGFloat = rounded ? 10 : 6
                 let loaded = t?.isLoaded == true || active
                 let img = t?.favicon ?? Tab.storedFavicon(for: n.url) ?? s.symbol("globe", tint: s.muted)
-                img?.draw(in: NSRect(x: 12, y: r.midY - 7, width: 14, height: 14), from: .zero, operation: .sourceOver,
+                img?.draw(in: NSRect(x: leftX, y: r.midY - 7, width: 14, height: 14), from: .zero, operation: .sourceOver,
                           fraction: loaded ? 1 : 0.55, respectFlipped: true, hints: nil)
                 let attrs: [NSAttributedString.Key: Any] = [.font: s.ui, .foregroundColor: loaded ? s.primary : s.muted]
                 let title = self.title(n, t) as NSString
                 let th = ceil(title.size(withAttributes: attrs).height)
-                var titleRight: CGFloat = 8
+                var titleRight: CGFloat = trail
                 if let t, t.muted || t.isPlaying,
                    let glyph = s.symbol(t.muted ? "speaker.slash" : "speaker.wave.2", size: 10, tint: s.muted) {
-                    glyph.draw(in: NSRect(x: r.maxX - 22, y: r.midY - 6, width: 12, height: 12), from: .zero,
+                    glyph.draw(in: NSRect(x: r.maxX - trail - 12, y: r.midY - 6, width: 12, height: 12), from: .zero,
                                operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
-                    titleRight = 26
+                    titleRight = trail + 18
                 }
-                title.draw(with: NSRect(x: 32, y: r.midY - th / 2, width: max(0, r.width - 32 - titleRight), height: th),
+                let titleX = leftX + 20
+                title.draw(with: NSRect(x: titleX, y: r.midY - th / 2, width: max(0, r.width - titleX - titleRight), height: th),
                            options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: attrs)
             }
             s.border.setFill()

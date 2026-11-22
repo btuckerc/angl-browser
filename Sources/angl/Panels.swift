@@ -61,7 +61,7 @@ final class BlankView: FlatView {
         // suggestions grow downward under it, so it is placed for the longest list.
         let band = PaletteView.fieldBand
         let width = max(120, min(640, bounds.width - 64))
-        let longest = band + SuggestionList.height(for: SuggestionList.visible)
+        let longest = band + 2 + SuggestionList.height(for: SuggestionList.visible, embedded: true, rounded: owner.style.radius > 0)
         let top = max(8, min(bounds.midY - 60 - band / 2, bounds.height - longest - 8)).rounded()
         let x = ((bounds.width - width) / 2).rounded()
         dock.frame = NSRect(x: x, y: top, width: width, height: dock.height)

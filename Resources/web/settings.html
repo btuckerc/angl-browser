@@ -17,7 +17,10 @@
       </aside>
       <main>
         <header class="settings-head">
-          <h1 id="title" tabindex="-1">Settings</h1>
+          <div class="head-bar">
+            <h1 id="title" tabindex="-1">Settings</h1>
+            <p id="status" class="status" role="status" aria-live="polite"></p>
+          </div>
           <div class="searchbar" role="search">
             <label class="visually-hidden" for="search">Search settings</label>
             <input id="search" type="search" placeholder="Search settings" autocomplete="off" spellcheck="false" aria-describedby="search-hint">
@@ -25,7 +28,6 @@
             <button id="modified" type="button" aria-pressed="false">Modified</button>
             <button id="clear" type="button" hidden>Clear filters</button>
           </div>
-          <p id="status" class="status" role="status" aria-live="polite"></p>
         </header>
         <div id="content"></div>
         <div id="empty" class="empty" hidden>

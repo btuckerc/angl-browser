@@ -20,7 +20,9 @@ final class PaletteView: FlatView, NSTextFieldDelegate {
 
     /// Height of the input row; the text is centred in it whether or not suggestions follow.
     static let fieldBand: CGFloat = 44
-    var height: CGFloat { Self.fieldBand + SuggestionList.height(for: list.items.count) }
+    var height: CGFloat {
+        Self.fieldBand + 2 + SuggestionList.height(for: list.items.count, embedded: true, rounded: owner.style.radius > 0)
+    }
     var editing: Bool { field.currentEditor() != nil }
 
     init(owner: BrowserWindowController, docked: Bool) {
