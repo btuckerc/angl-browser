@@ -113,4 +113,20 @@ final class StoresTests: XCTestCase {
         XCTAssertTrue(store.deleteRecovery(id: record.id))
         XCTAssertEqual(store.recovery(reason: .archived), [])
     }
+
+    func testHistoryFlushCheckpointsAndTruncatesWAL() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let db = dir.appendingPathComponent("history.sqlite")
+        let wal = dir.appendingPathComponent("history.sqlite-wal")
+        let store = try HistoryStore(url: db)
+        for i in 0..<50 {
+            store.record(url: URL(string: "https://example.test/\(i)")!, title: "Page \(i)", typed: false)
+        }
+        store.flush()
+        let walSize = (try? FileManager.default.attributesOfItem(atPath: wal.path)[.size] as? Int) ?? 0
+        XCTAssertEqual(walSize, 0)
+        XCTAssertEqual(store.query("example.test", limit: 100, offset: 0).count, 50)
+    }
 }

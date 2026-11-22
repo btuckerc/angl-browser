@@ -13,16 +13,18 @@ final class WebEnvironment {
     let scripts: InjectedScripts
     let pages = InternalPages()
     private var stores: [UUID: WKWebsiteDataStore] = [:]
-    let userAgentApplicationName: String
+    /// Safari's exact UA tail: WebKit already supplies the Mozilla/AppleWebKit prefix. Loaded on
+    /// first WebView creation so empty-window launches don't read Safari.app's Info.plist.
+    lazy var userAgentApplicationName: String = {
+        let safari = Bundle(url: URL(fileURLWithPath: "/Applications/Safari.app"))
+        let version = (safari?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "26.0"
+        return "Version/\(version) Safari/605.1.15"
+    }()
 
     init(paths: Paths) {
         self.paths = paths
         blocker = ContentBlocker(paths: paths)
         scripts = InjectedScripts(paths: paths)
-        // Safari's exact UA tail: WebKit already supplies the Mozilla/AppleWebKit prefix.
-        let safari = Bundle(url: URL(fileURLWithPath: "/Applications/Safari.app"))
-        let version = (safari?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "26.0"
-        userAgentApplicationName = "Version/\(version) Safari/605.1.15"
     }
 
     func start(settings: Settings) {
@@ -116,6 +118,9 @@ final class WebEnvironment {
         // Picture in Picture, off by default for apps (Safari turns it on): the PiP command and
         // auto PiP call the page's requestPictureInPicture, which WebKit refuses without it.
         Self.setFeature(Self.pictureInPictureFeature, true, on: cfg.preferences)
+        // Progressive timer backoff in silent background tabs (off by default for WKWebView apps,
+        // leaving hidden-tab setIntervals firing at 1 Hz indefinitely); WebKit exempts active audio.
+        Self.setFeature(Self.hiddenTimerAutoIncreaseFeature, true, on: cfg.preferences)
         cfg.setURLSchemeHandler(pages, forURLScheme: InternalPages.scheme)
         return cfg
     }
@@ -152,6 +157,7 @@ final class WebEnvironment {
     private static func feature(_ key: String) -> NSObject? { features.first { $0.value(forKey: "key") as? String == key } }
     private static let near60FPSFeature = feature("PreferPageRenderingUpdatesNear60FPSEnabled")
     private static let pictureInPictureFeature = feature("AllowsPictureInPictureMediaPlayback")
+    private static let hiddenTimerAutoIncreaseFeature = feature("HiddenPageDOMTimerThrottlingAutoIncreases")
 
     /// SPI feature flag switch; a missing flag (another WebKit) leaves WebKit's default.
     private static func setFeature(_ feature: NSObject?, _ on: Bool, on preferences: WKPreferences) {
@@ -200,15 +206,29 @@ final class WebEnvironment {
 /// when the enabled lists in Settings no longer match what's installed.
 @MainActor
 final class ContentBlocker {
+    private static let fontJSON = FilterListConverter.fontBlockList()
+    private static let fontID = FilterListConverter.ruleListIdentifier(prefix: "angl-fonts", encoded: fontJSON)
+    private static let youtubeJSON = FilterListConverter.youtubeThumbnailBlockList()
+    private static let youtubeID = FilterListConverter.ruleListIdentifier(prefix: "angl-youtube-frames", encoded: youtubeJSON)
+
     private let paths: Paths
     private(set) var lists: [WKContentRuleList] = []
     private(set) var fontList: WKContentRuleList?
     private(set) var youtubeList: WKContentRuleList?
     private(set) var manifest: FilterListManifest?
     private var advancedLookup: AdvancedRuleLookup?
-    private(set) var busy = false
+    private var advancedLoadedKey: (storage: URL, index: URL)?
+    private var isUpdating = false
+    private var isCompiling = false
+    var busy: Bool { isUpdating || isCompiling }
     private(set) var error: String?
-    private let store = WKContentRuleListStore.default()!
+    /// Opened on demand so empty-window launches don't boot WebKit's rule-list store or JSC scavenger.
+    private lazy var store: WKContentRuleListStore = WKContentRuleListStore.default()!
+    private var cachedReadyTask: Task<Void, Never>?
+    private var fontTask: Task<WKContentRuleList?, Never>?
+    private var youtubeTask: Task<WKContentRuleList?, Never>?
+    private var compileDepth = 0
+    private var stateGeneration = 0
 
     init(paths: Paths) { self.paths = paths }
 
@@ -227,53 +247,260 @@ final class ContentBlocker {
 
     private var wanted: [String] { FilterListManifest.sources(for: Browser.shared.settings.blocking.lists) }
 
-    /// Newest manifest built from the enabled lists (downloaded, else the snapshot bundled in the
-    /// app); failing that the newest of any, so pages stay protected while the right one builds.
-    private func currentSource() -> (FilterListManifest, URL)? {
+    private static func sameManifest(_ a: FilterListManifest, _ b: FilterListManifest) -> Bool {
+        a.generated == b.generated
+            && a.chunks.map(\.id) == b.chunks.map(\.id)
+            && a.advancedStorageFile == b.advancedStorageFile
+            && a.advancedIndexFile == b.advancedIndexFile
+            && a.sources == b.sources
+    }
+
+    private func availableSources() -> [(FilterListManifest, URL)] {
         let dirs = [paths.listsDir, Bundle.main.resourceURL?.appendingPathComponent("lists")].compactMap { $0 }
-        let found = dirs.compactMap { dir -> (FilterListManifest, URL)? in
+        return dirs.compactMap { dir -> (FilterListManifest, URL)? in
             guard let m = try? JSONFile.read(FilterListManifest.self, from: dir.appendingPathComponent("manifest.json")) else { return nil }
             return (m, dir)
         }
+    }
+
+    private func alternateSource(excluding dir: URL) -> (FilterListManifest, URL)? {
+        availableSources().first { $0.1 != dir }
+    }
+
+    /// Newest manifest built from the enabled lists (downloaded, else the snapshot bundled in the
+    /// app); failing that the newest of any, so pages stay protected while the right one builds.
+    private func currentSource() -> (FilterListManifest, URL)? {
+        let found = availableSources()
         let wanted = self.wanted
         let newest: ((FilterListManifest, URL), (FilterListManifest, URL)) -> Bool = { $0.0.generated < $1.0.generated }
         return found.filter { $0.0.sources == wanted }.max(by: newest) ?? found.max(by: newest)
     }
 
-    private func openAdvanced(_ m: FilterListManifest, in dir: URL) {
+    private func loadAdvanced(_ m: FilterListManifest, in dir: URL) -> Result<AdvancedRuleLookup, Error> {
+        let storageURL = dir.appendingPathComponent(m.advancedStorageFile)
+        let indexURL = dir.appendingPathComponent(m.advancedIndexFile)
+        if let existing = advancedLookup, advancedLoadedKey?.storage == storageURL, advancedLoadedKey?.index == indexURL {
+            return .success(existing)
+        }
         do {
-            advancedLookup = try AdvancedRuleLookup(storageURL: dir.appendingPathComponent(m.advancedStorageFile),
-                                                    indexURL: dir.appendingPathComponent(m.advancedIndexFile))
+            return .success(try AdvancedRuleLookup(storageURL: storageURL, indexURL: indexURL))
         } catch {
-            advancedLookup = nil
-            self.error = "advanced rules: \(error.localizedDescription)"
+            return .failure(error)
         }
     }
 
-    func load(settings: Settings) {
-        if let (manifest, directory) = currentSource() {
-            self.manifest = manifest
-            openAdvanced(manifest, in: directory)
+    private func installAdvanced(_ lookup: AdvancedRuleLookup?, for m: FilterListManifest, in dir: URL) {
+        if let lookup {
+            advancedLookup = lookup
+            advancedLoadedKey = (dir.appendingPathComponent(m.advancedStorageFile), dir.appendingPathComponent(m.advancedIndexFile))
+        } else {
+            clearAdvanced()
         }
+    }
+
+    private func clearAdvanced() {
+        advancedLookup = nil
+        advancedLoadedKey = nil
+    }
+
+    func load(settings: Settings) {
+        if !wanted.isEmpty, let (m, _) = currentSource() { manifest = m }
         NotificationCenter.default.addObserver(forName: .anglSettings, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.selectionChanged() }
         }
-        Task {
-            await compile()
-            // Neither the downloaded nor the bundled lists match Settings (lists toggled, app updated).
-            if !wanted.isEmpty, manifest?.sources != wanted { update(settings: Browser.shared.settings) }
-        }
-        Task {
-            fontList = try? await store.compileContentRuleList(
-                forIdentifier: "angl-fonts", encodedContentRuleList: FilterListConverter.fontBlockList())
-        }
-        Task {
-            youtubeList = try? await store.compileContentRuleList(
-                forIdentifier: "angl-youtube-frames", encodedContentRuleList: FilterListConverter.youtubeThumbnailBlockList())
-            // Tabs restored before it compiled get it now.
-            if youtubeList != nil, Browser.shared.settings.content.youtubeFrames {
-                Browser.shared.windows.forEach { $0.refreshContentPolicies() }
+    }
+
+    /// Starts looking up already-compiled lists in WebKit's store immediately (all lookups fan out
+    /// onto WebKit's background store queue right away, in parallel with WebView creation).
+    /// Serialized through `compiling` so settings changes or updates cannot race with startup lookup.
+    func prepare() {
+        guard cachedReadyTask == nil else { return }
+        let store = self.store
+        let fontLookup = ensureSmallList(id: Self.fontID, encoded: Self.fontJSON, current: fontList, slot: &fontTask, store: store)
+        let youtubeLookup = ensureSmallList(id: Self.youtubeID, encoded: Self.youtubeJSON, current: youtubeList, slot: &youtubeTask, store: store)
+        let wanted = self.wanted
+        let source = wanted.isEmpty ? nil : currentSource()
+        let chunkLookups = source.map { src in src.0.chunks.map { startLookup(store: store, id: $0.id) } } ?? []
+        let previous = compiling
+        compileDepth += 1
+        let task = Task {
+            defer {
+                self.compileDepth -= 1
+                if self.compileDepth == 0 { self.compiling = nil }
             }
+            await previous?.value
+            await finishPrepare(fontLookup: fontLookup, youtubeLookup: youtubeLookup,
+                                wanted: wanted, source: source, chunkLookups: chunkLookups)
+        }
+        compiling = task
+        cachedReadyTask = task
+    }
+
+    /// Waits only for the rule lists a page's policy will actually install (never blocking opted-out
+    /// sites on cold subscription compilation, and never blocking on network downloads).
+    func waitUntilReady(mainLists: Bool, fonts: Bool, youtube: Bool) async {
+        if mainLists {
+            prepare()
+            if lists.isEmpty, let task = compiling {
+                await task.value
+            } else {
+                await cachedReadyTask?.value
+            }
+            return
+        }
+        if fonts, fontList == nil {
+            let task = ensureSmallList(id: Self.fontID, encoded: Self.fontJSON, current: fontList, slot: &fontTask, store: store)
+            if let hit = await task.value { fontList = hit }
+        }
+        if youtube, youtubeList == nil {
+            let task = ensureSmallList(id: Self.youtubeID, encoded: Self.youtubeJSON, current: youtubeList, slot: &youtubeTask, store: store)
+            if let hit = await task.value { youtubeList = hit }
+        }
+    }
+
+    private func ensureSmallList(
+        id: String,
+        encoded: String,
+        current: WKContentRuleList?,
+        slot: inout Task<WKContentRuleList?, Never>?,
+        store: WKContentRuleListStore
+    ) -> Task<WKContentRuleList?, Never> {
+        if let current { return Task { current } }
+        if let existing = slot { return existing }
+        let lookup = startLookup(store: store, id: id)
+        let task = Task<WKContentRuleList?, Never> { @MainActor in
+            if let hit = await lookup.value { return hit }
+            return try? await store.compileContentRuleList(forIdentifier: id, encodedContentRuleList: encoded)
+        }
+        slot = task
+        return task
+    }
+
+    /// Begins a WebKit rule-list lookup synchronously so WebKit's background queue runs while the
+    /// main thread builds the web view.
+    private func startLookup(store: WKContentRuleListStore, id: String) -> Task<WKContentRuleList?, Never> {
+        @MainActor final class Box {
+            var result: WKContentRuleList??
+            var resume: ((WKContentRuleList?) -> Void)?
+        }
+        let box = Box()
+        store.lookUpContentRuleList(forIdentifier: id) { list, _ in
+            MainActor.assumeIsolated {
+                if let r = box.resume {
+                    box.resume = nil
+                    r(list)
+                } else {
+                    box.result = .some(list)
+                }
+            }
+        }
+        return Task { @MainActor in
+            if let done = box.result { return done }
+            return await withCheckedContinuation { cont in
+                if let done = box.result { cont.resume(returning: done) }
+                else { box.resume = { cont.resume(returning: $0) } }
+            }
+        }
+    }
+
+    private func finishPrepare(
+        fontLookup: Task<WKContentRuleList?, Never>,
+        youtubeLookup: Task<WKContentRuleList?, Never>,
+        wanted: [String],
+        source: (FilterListManifest, URL)?,
+        chunkLookups: [Task<WKContentRuleList?, Never>]
+    ) async {
+        if fontList == nil { fontList = await fontLookup.value }
+        if youtubeList == nil { youtubeList = await youtubeLookup.value }
+        // Re-check live settings after awaiting lookups: settings or an update may have changed.
+        if self.wanted != wanted {
+            await compileNow()
+            return
+        }
+        guard !wanted.isEmpty else {
+            lists = []
+            manifest = nil
+            clearAdvanced()
+            error = nil
+            stateGeneration += 1
+            Browser.shared.windows.forEach { $0.refreshContentPolicies() }
+            return
+        }
+        guard let (m, dir) = source else {
+            error = "no block lists"
+            Task { [weak self] in self?.update(settings: Browser.shared.settings) }
+            return
+        }
+        // If an earlier compile/update already installed this exact manifest completely, keep it (and its error).
+        if let cur = self.manifest, Self.sameManifest(cur, m), self.lists.count == m.chunks.count,
+           (!Browser.shared.settings.blocking.advanced || self.advancedLookup != nil) {
+            return
+        }
+        var found: [WKContentRuleList?] = []
+        found.reserveCapacity(chunkLookups.count)
+        for lookup in chunkLookups { found.append(await lookup.value) }
+        // Re-check live settings and manifest identity after awaiting chunk lookups.
+        guard self.wanted == wanted, let current = currentSource(), Self.sameManifest(current.0, m), current.1 == dir else {
+            if let current = currentSource(), let cur = self.manifest, Self.sameManifest(cur, current.0),
+               self.lists.count == current.0.chunks.count, self.wanted == cur.sources {
+                return
+            }
+            await compileNow()
+            return
+        }
+        if !found.contains(where: { $0 == nil }) {
+            let advResult = loadAdvanced(m, in: dir)
+            let advOK = (try? advResult.get()) != nil
+            if advOK || !Browser.shared.settings.blocking.advanced {
+                lists = found.compactMap { $0 }
+                manifest = m
+                let preserved = error?.hasPrefix("update failed:") == true ? error : nil
+                error = preserved
+                installAdvanced(try? advResult.get(), for: m, in: dir)
+                stateGeneration += 1
+                let gen = stateGeneration
+                Browser.shared.windows.forEach { $0.refreshContentPolicies() }
+                let keep = Set(m.chunks.map(\.id)).union([Self.fontID, Self.youtubeID])
+                Task { [weak self] in
+                    guard let self, self.stateGeneration == gen else { return }
+                    await self.pruneStore(keeping: keep)
+                    if self.stateGeneration == gen, !self.wanted.isEmpty, self.manifest?.sources != self.wanted {
+                        self.update(settings: Browser.shared.settings)
+                    }
+                }
+                return
+            }
+        }
+        // Cold/partial cache miss or unreadable advanced index: compile (with alternate fallback)
+        // before letting the first protected page navigate so blocking is active from byte 0.
+        await compileNow()
+        if !self.wanted.isEmpty, self.manifest?.sources != self.wanted {
+            Task { [weak self] in self?.update(settings: Browser.shared.settings) }
+        }
+    }
+
+    /// Keeps rule-list chunks needed by any existing profile or the bundled snapshot, so switching
+    /// profiles sharing WebKit's default store does not evict another profile's compiled lists.
+    private func allRetainedIdentifiers(including keep: Set<String>) -> Set<String> {
+        var retained = keep
+        var dirs = Paths.existingProfiles().map { Paths(profile: $0).listsDir }
+        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("lists") { dirs.append(bundled) }
+        for dir in dirs {
+            if let m = try? JSONFile.read(FilterListManifest.self, from: dir.appendingPathComponent("manifest.json")) {
+                retained.formUnion(m.chunks.map(\.id))
+            }
+        }
+        return retained
+    }
+
+    /// Queries the store inventory *before* reading all profiles' manifests: because ListWorker writes
+    /// manifest.json before compiling its chunks, any chunk present in `ids` already has its manifest
+    /// on disk when `allRetainedIdentifiers` scans, preventing concurrent-profile eviction.
+    private func pruneStore(keeping keep: Set<String>) async {
+        guard let ids = await store.availableIdentifiers() else { return }
+        let retained = allRetainedIdentifiers(including: keep)
+        for id in ids where id.hasPrefix("angl-") && !retained.contains(id) {
+            try? await store.removeContentRuleList(forIdentifier: id)
         }
     }
 
@@ -282,10 +509,10 @@ final class ContentBlocker {
     private func selectionChanged() {
         let wanted = self.wanted
         if wanted.isEmpty {
-            if manifest != nil || !lists.isEmpty { Task { await compile() } }
+            if manifest != nil || !lists.isEmpty || compileDepth > 0 { Task { await compile() } }
             return
         }
-        guard manifest?.sources != wanted else { return }
+        guard manifest?.sources != wanted || compileDepth > 0 else { return }
         if currentSource()?.0.sources == wanted { Task { await compile() } }
         else { update(settings: Browser.shared.settings) }
     }
@@ -294,53 +521,116 @@ final class ContentBlocker {
 
     /// Serialized, so a compile always finishes against the settings current when it started and
     /// the last one queued reflects the latest selection.
-    private func compile() async {
+    private func compile(preservingError: String? = nil) async {
         let previous = compiling
-        let next = Task { await previous?.value; await compileNow() }
+        compileDepth += 1
+        let next = Task {
+            defer {
+                self.compileDepth -= 1
+                if self.compileDepth == 0 { self.compiling = nil }
+            }
+            await previous?.value
+            await compileNow(preservingError: preservingError)
+        }
         compiling = next
         await next.value
     }
 
-    private func compileNow() async {
+    private func resolveChunks(for m: FilterListManifest, in dir: URL) async -> (lists: [WKContentRuleList], complete: Bool, error: String?) {
+        var found: [WKContentRuleList?] = []
+        for chunk in m.chunks { found.append(try? await store.contentRuleList(forIdentifier: chunk.id)) }
+        if !found.contains(where: { $0 == nil }) {
+            return (found.compactMap { $0 }, true, nil)
+        }
+        // Compiling happens in ListWorker's child, off this process's memory.
+        let failure = await ListWorker.run(dir, timeout: 60)
+        found = []
+        for chunk in m.chunks { found.append(try? await store.contentRuleList(forIdentifier: chunk.id)) }
+        let complete = !found.contains(where: { $0 == nil })
+        return (found.compactMap { $0 }, complete, complete ? nil : (failure ?? "block lists didn't compile"))
+    }
+
+    private func compileNow(preservingError: String? = nil) async {
+        let wantedAtStart = self.wanted
+        if fontList == nil {
+            fontList = await ensureSmallList(id: Self.fontID, encoded: Self.fontJSON, current: fontList, slot: &fontTask, store: store).value
+        }
+        if youtubeList == nil {
+            youtubeList = await ensureSmallList(id: Self.youtubeID, encoded: Self.youtubeJSON, current: youtubeList, slot: &youtubeTask, store: store).value
+        }
         guard !wanted.isEmpty else {  // every list off: no blocking at all
             lists = []
             manifest = nil
-            advancedLookup = nil
+            clearAdvanced()
             error = nil
+            stateGeneration += 1
             Browser.shared.post(.anglBlocking)
             Browser.shared.windows.forEach { $0.refreshContentPolicies() }
             return
         }
-        guard let (m, dir) = currentSource() else { error = "no block lists"; return }
-        // load() already opened this manifest's index; only a new manifest needs a new one.
-        if advancedLookup == nil || manifest?.generated != m.generated { openAdvanced(m, in: dir) }
-        busy = true
-        defer { busy = false; Browser.shared.post(.anglBlocking) }
-        var found: [WKContentRuleList?] = []
-        for chunk in m.chunks { found.append(try? await store.contentRuleList(forIdentifier: chunk.id)) }
-        if found.contains(where: { $0 == nil }) {
-            // Compiling happens in ListWorker's child, off this process's memory.
-            let failure = await ListWorker.run(dir)
-            found = []
-            for chunk in m.chunks { found.append(try? await store.contentRuleList(forIdentifier: chunk.id)) }
-            if found.contains(where: { $0 == nil }) {
-                error = failure ?? "block lists didn't compile"
-                // Keep the working build (and its compiled lists); a partial one only beats none.
-                guard lists.isEmpty else { return }
-                lists = found.compactMap { $0 }
-                Browser.shared.windows.forEach { $0.refreshContentPolicies() }
-                return
-            }
+        guard let (m, dir) = currentSource() else {
+            error = preservingError ?? "no block lists"
+            Browser.shared.post(.anglBlocking)
+            return
         }
-        lists = found.compactMap { $0 }
+        isCompiling = true
+        defer { isCompiling = false; Browser.shared.post(.anglBlocking) }
+        let res = await resolveChunks(for: m, in: dir)
+        // Revalidate live selection after async lookup/compile so rapid toggles cannot install stale lists.
+        if self.wanted != wantedAtStart {
+            isCompiling = false
+            await compileNow()
+            return
+        }
+        let advResult = loadAdvanced(m, in: dir)
+        let advFailed: String? = {
+            if case .failure(let e) = advResult, Browser.shared.settings.blocking.advanced {
+                return "advanced rules: \(e.localizedDescription)"
+            }
+            return nil
+        }()
+        if !res.complete || advFailed != nil {
+            let err = preservingError ?? res.error ?? advFailed ?? "block lists didn't compile"
+            error = err
+            // Keep the working build (and its compiled lists + matching advanced index); if none is
+            // installed yet, try the alternate local manifest (bundled or downloaded) before partial chunks.
+            guard lists.isEmpty else { return }
+            if let (am, adir) = alternateSource(excluding: dir) {
+                let fallback = await resolveChunks(for: am, in: adir)
+                if self.wanted != wantedAtStart {
+                    isCompiling = false
+                    await compileNow()
+                    return
+                }
+                let altAdv = loadAdvanced(am, in: adir)
+                let altAdvOK = (try? altAdv.get()) != nil || !Browser.shared.settings.blocking.advanced
+                if fallback.complete && altAdvOK {
+                    lists = fallback.lists
+                    manifest = am
+                    installAdvanced(try? altAdv.get(), for: am, in: adir)
+                    stateGeneration += 1
+                    Browser.shared.windows.forEach { $0.refreshContentPolicies() }
+                    if dir == paths.listsDir, preservingError == nil {
+                        Task { [weak self] in self?.update(settings: Browser.shared.settings) }
+                    }
+                    return
+                }
+            }
+            lists = res.lists
+            manifest = m
+            installAdvanced(try? advResult.get(), for: m, in: dir)
+            stateGeneration += 1
+            Browser.shared.windows.forEach { $0.refreshContentPolicies() }
+            return
+        }
+        lists = res.lists
         manifest = m
-        // Drop compiled lists from older manifests.
-        let keep = Set(m.chunks.map(\.id)).union(["angl-fonts", "angl-youtube-frames"])
-        if let ids = await store.availableIdentifiers() {
-            for id in ids where id.hasPrefix("angl-") && !keep.contains(id) {
-                try? await store.removeContentRuleList(forIdentifier: id)
-            }
-        }
+        error = preservingError
+        installAdvanced(try? advResult.get(), for: m, in: dir)
+        stateGeneration += 1
+        // Drop compiled lists from older manifests (keeping chunks needed by other profiles).
+        let keep = Set(m.chunks.map(\.id)).union([Self.fontID, Self.youtubeID])
+        await pruneStore(keeping: keep)
         Browser.shared.windows.forEach { $0.refreshContentPolicies() }
     }
 
@@ -351,17 +641,21 @@ final class ContentBlocker {
     }
 
     func update(settings: Settings) {
-        guard !busy else { return }
+        guard !isUpdating else { return }
         let lists = settings.blocking.lists
         guard lists.contains(where: \.enabled) else { Task { await compile() }; return }
-        busy = true
+        isUpdating = true
         error = nil
         Browser.shared.post(.anglBlocking)
         let dir = paths.listsDir
         Task {
-            if let failure = await ListWorker.run(dir, lists: lists) { self.error = "update failed: \(failure)" }
-            busy = false
-            await compile()
+            defer {
+                isUpdating = false
+                Browser.shared.post(.anglBlocking)
+            }
+            let failure = await ListWorker.run(dir, lists: lists)
+            let updateError = failure.map { "update failed: \($0)" }
+            await compile(preservingError: updateError)
             // Lists toggled again while this built.
             if wanted != FilterListManifest.sources(for: lists) { selectionChanged() }
         }
@@ -483,7 +777,7 @@ final class InjectedScripts {
         let volume = source("volume.js")
             .replacingOccurrences(of: "__ANGL_FACTOR__", with: String(InjectedScripts.volumeFactor(policy.volumeDB)))
             .replacingOccurrences(of: "__ANGL_MUTED__", with: muted ? "true" : "false")
-        if twitchEmotes, ["twitch.tv", "www.twitch.tv", "m.twitch.tv"].contains(url?.host?.lowercased() ?? "") {
+        if twitchEmotes, InjectedScripts.isTwitch(url) {
             add(source("twitch-emotes.js"), .atDocumentStart, mainOnly: false, world: InjectedScripts.twitchWorld)
         }
         let youtube = InjectedScripts.isYouTube(url)
@@ -520,6 +814,10 @@ final class InjectedScripts {
 
     static func isYouTube(_ url: URL?) -> Bool {
         ["youtube.com", "www.youtube.com", "m.youtube.com"].contains(url?.host?.lowercased() ?? "")
+    }
+
+    static func isTwitch(_ url: URL?) -> Bool {
+        ["twitch.tv", "www.twitch.tv", "m.twitch.tv"].contains(url?.host?.lowercased() ?? "")
     }
 
     static let twitchWorld = WKContentWorld.world(name: "angl-twitch")

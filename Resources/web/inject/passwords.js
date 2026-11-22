@@ -147,13 +147,18 @@
     if (kind && visible(el)) report(el, 'auto', kind);
   };
   let timer = 0;
-  const soon = () => { clearTimeout(timer); timer = setTimeout(scan, 350); };
+  const soon = () => { clearTimeout(timer); timer = setTimeout(() => { timer = 0; scan(); }, 350); };
   document.addEventListener('DOMContentLoaded', soon);
   addEventListener('load', soon);
   addEventListener('pageshow', soon);
   document.addEventListener('visibilitychange', soon);
-  // Hidden pages scan on reveal (visibilitychange), not on every mutation.
-  new MutationObserver(() => { if (!shown && document.visibilityState === 'visible') soon(); }).observe(document, { childList: true, subtree: true });
+  // Hidden pages scan on reveal (visibilitychange); visible mutations only matter when an empty,
+  // unannounced input is already focused (e.g. a delayed password field appearing beside it).
+  new MutationObserver(() => {
+    if (shown || timer || document.visibilityState !== 'visible') return;
+    const el = document.activeElement;
+    if (el instanceof HTMLInputElement && !el.value && !announced.has(el)) soon();
+  }).observe(document, { childList: true, subtree: true });
 
   // Focus offers logins only for empty fields (not after a fill, not over the page's own autofill).
   addEventListener('blur', (e) => { if (e.target === window) refocus = document.activeElement; }, true);

@@ -18,6 +18,8 @@ final class SidebarView: FlatView, NSOutlineViewDataSource, NSOutlineViewDelegat
     private let scroll = SidebarScrollView()
     let outline = TabOutlineView()
     private let footer: DownloadsFooter
+    /// 1 pt right border or seam outline as a layer-backed strip so SidebarView needs no IOSurface.
+    private let seam = PassiveFlatView()
     private var outlineColorOverride: NSColor?
     private var outlineWidth: CGFloat = 1
     private var outlineVisible = false
@@ -74,10 +76,8 @@ final class SidebarView: FlatView, NSOutlineViewDataSource, NSOutlineViewDelegat
         scroll.scrollerStyle = .overlay
         scroll.owner = owner
         paletteHeader.owner = owner
-        addSubview(paletteHeader)
-
-        for v: NSView in [favorites, strip, pinned, scroll, footer] { addSubview(v) }
-        applyStyle()
+        for v: NSView in [seam, paletteHeader, favorites, strip, pinned, scroll, footer] { addSubview(v) }
+        applyStyle(reload: false)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -85,31 +85,24 @@ final class SidebarView: FlatView, NSOutlineViewDataSource, NSOutlineViewDelegat
         outlineColorOverride = color
         outlineWidth = width
         outlineVisible = visible
-        borderColor = visible ? nil : style.border
-        edges = visible ? [] : .right
-        needsDisplay = true
+        seam.fill = visible ? color : style.border
+        needsLayout = true
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        guard outlineVisible, let color = outlineColorOverride else { return }
-        color.setFill()
-        NSRect(x: bounds.width - outlineWidth, y: 0, width: outlineWidth, height: bounds.height).fill()
-    }
-
-    func applyStyle() {
+    func applyStyle(reload shouldReload: Bool = true) {
         fill = style.sidebar
-        borderColor = style.border
-        edges = .right
+        seam.fill = outlineVisible ? (outlineColorOverride ?? style.border) : style.border
         outline.indentationPerLevel = style.indent
         footer.applyStyle()
         paletteHeader.applyStyle()
         needsLayout = true
-        reload()
+        if shouldReload { reload() }
     }
 
     override func layout() {
         super.layout()
+        let seamW = outlineVisible ? outlineWidth : 1
+        seam.frame = NSRect(x: bounds.width - seamW, y: 0, width: seamW, height: bounds.height)
         let w = bounds.width - 1
         let headerH: CGFloat = paletteHeaderVisible ? SidebarPaletteHeader.height : 0
         paletteHeader.frame = NSRect(x: 0, y: 0, width: w, height: headerH)

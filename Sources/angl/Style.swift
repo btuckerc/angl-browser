@@ -88,16 +88,64 @@ func contrast(_ a: NSColor, _ b: NSColor) -> Double {
     return contrastRatio(hex(a), hex(b)) ?? 21
 }
 
-/// A flat view with a solid background, optional corner radius and optional hairlines.
+/// A flat view with a solid background, optional corner radius and optional hairlines. Solid fills
+/// and all-edge hairlines paint through CALayer properties (zero IOSurface backing store); partial
+/// edges draw on demand.
 class FlatView: NSView {
     var fill: NSColor? { didSet { if fill != oldValue { needsDisplay = true } } }
-    var borderColor: NSColor? { didSet { if borderColor != oldValue { needsDisplay = true } } }
-    var edges: NSRectEdge.Set = [] { didSet { if edges != oldValue { needsDisplay = true } } }
+    var borderColor: NSColor? { didSet { if borderColor != oldValue { syncBacking(); needsDisplay = true } } }
+    var edges: NSRectEdge.Set = [] { didSet { if edges != oldValue { syncBacking(); needsDisplay = true } } }
     var cornerRadius: CGFloat = 0 { didSet { if cornerRadius != oldValue { needsDisplay = true } } }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        wantsLayer = true
+    }
 
     override var isFlipped: Bool { true }
 
+    override var wantsUpdateLayer: Bool { edges.isEmpty || borderColor == nil || edges == .all }
+
+    private func syncBacking() {
+        if wantsUpdateLayer { layer?.contents = nil }
+    }
+
+    override func layout() {
+        super.layout()
+        if wantsUpdateLayer, cornerRadius > 0 {
+            layer?.cornerRadius = min(cornerRadius, min(bounds.width, bounds.height) / 2)
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    override func updateLayer() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = fill?.cgColor
+            layer?.cornerRadius = min(cornerRadius, min(bounds.width, bounds.height) / 2)
+            if edges == .all, let borderColor {
+                layer?.borderWidth = 1
+                layer?.borderColor = borderColor.cgColor
+            } else {
+                layer?.borderWidth = 0
+                layer?.borderColor = nil
+            }
+        }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
+        layer?.backgroundColor = nil
+        layer?.cornerRadius = 0
+        layer?.borderWidth = 0
+        layer?.borderColor = nil
         let r = min(cornerRadius, min(bounds.width, bounds.height) / 2)
         if let fill {
             fill.setFill()
@@ -118,6 +166,11 @@ class FlatView: NSView {
         if edges.contains(.left) { NSRect(x: 0, y: 0, width: 1, height: bounds.height).fill() }
         if edges.contains(.right) { NSRect(x: bounds.width - 1, y: 0, width: 1, height: bounds.height).fill() }
     }
+}
+
+/// Decorative FlatView that passes all pointer hit-testing through to views behind/around it.
+final class PassiveFlatView: FlatView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 /// Hosts a floating panel's `body` in an `NSGlassEffectView` when Liquid Glass is active,

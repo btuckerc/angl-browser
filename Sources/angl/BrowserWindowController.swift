@@ -120,7 +120,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
             window.center()
         }
         observe()
-        applyStyle()
+        applyStyle(reloadSidebar: false)
         showWorkspace(workspaceID)
     }
 
@@ -695,10 +695,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
             active = nil
             attachActive()
             openAddressPalette(prefill: nil, newTab: true)
+            sidebar.reload()
         } else {
             openTab(nil, activate: true)
         }
-        sidebar.reload()
         browser.markSessionDirty()
     }
 
@@ -1140,7 +1140,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         layoutContentPanes()
         status.reposition(in: content.bounds)
         updateProgressLine()
-        content.layer?.cornerRadius = inset > 0 ? style.radius : 0
+        content.cornerRadius = inset > 0 ? style.radius : 0
         content.layer?.masksToBounds = inset > 0
         contentFrame.cornerRadius = style.radius
         contentFrame.frame = NSRect(x: contentX, y: navH + inset, width: max(0, bounds.width - contentX - inset), height: max(0, bounds.height - navH - 2 * inset))
@@ -1164,12 +1164,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         progressLine.frame = NSRect(x: 0, y: 0, width: content.bounds.width * max(0.05, active?.progress ?? 0), height: 2)
     }
 
-    private func applyStyle() {
+    private func applyStyle(reloadSidebar: Bool = true) {
         let s = style
         window?.backgroundColor = s.base
         content.fill = s.base
         navBar.applyStyle()
-        sidebar.applyStyle()
+        sidebar.applyStyle(reload: reloadSidebar)
         palette.applyStyle()
         findBar.applyStyle()
         permissionBar.applyStyle(s)
@@ -1219,18 +1219,37 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
 }
 
 final class ContentFrameView: NSView {
-    var color: NSColor = .clear { didSet { needsDisplay = true } }
-    var lineWidth: CGFloat = 1 { didSet { needsDisplay = true } }
+    var color: NSColor = .clear { didSet { if color != oldValue { needsDisplay = true } } }
+    var lineWidth: CGFloat = 1 { didSet { if lineWidth != oldValue { needsDisplay = true } } }
     var cornerRadius: CGFloat = 0 { didSet { if cornerRadius != oldValue { needsDisplay = true } } }
-    override var isFlipped: Bool { true }
-    override func draw(_ dirtyRect: NSRect) {
-        let insetRect = bounds.insetBy(dx: lineWidth / 2, dy: lineWidth / 2)
-        let r = max(0, cornerRadius - lineWidth / 2)
-        let path = r > 0 ? NSBezierPath(roundedRect: insetRect, xRadius: r, yRadius: r) : NSBezierPath(rect: insetRect)
-        path.lineWidth = lineWidth
-        color.setStroke()
-        path.stroke()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
     }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        wantsLayer = true
+    }
+
+    override var isFlipped: Bool { true }
+    override var wantsUpdateLayer: Bool { true }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    override func updateLayer() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = nil
+            layer?.cornerRadius = cornerRadius
+            layer?.borderWidth = lineWidth
+            layer?.borderColor = color.cgColor
+        }
+    }
+
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
@@ -1350,6 +1369,8 @@ final class ResizeHandle: NSView {
 final class SplitDivider: FlatView {
     var onDrag: ((CGFloat) -> Void)?
     private var last: CGFloat = 0
+
+    override var wantsUpdateLayer: Bool { false }
 
     override func draw(_ dirtyRect: NSRect) {
         if let fill { fill.setFill(); bounds.fill() }

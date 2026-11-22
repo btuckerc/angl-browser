@@ -163,6 +163,13 @@ public enum FilterListConverter {
         return ScriptletInvocation(name: name, arguments: Array(values.dropFirst()))
     }
 
+    /// Content-hashed WebKit rule-list identifier (`<prefix>-<sha12>`), matching chunk IDs so
+    /// rule updates compile once and old versions are pruned automatically.
+    public static func ruleListIdentifier(prefix: String, encoded: String) -> String {
+        let digest = SHA256.hash(data: Data(encoded.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()
+        return "\(prefix)-\(digest)"
+    }
+
     public static func fontBlockList() -> String {
         "[{\"action\":{\"type\":\"block\"},\"trigger\":{\"url-filter\":\".*\",\"resource-type\":[\"font\"]}}]"
     }
@@ -259,6 +266,7 @@ public struct FilterListManifest: Codable, Sendable {
         let output = FilterListConverter.convert(downloaded.sorted { $0.0 < $1.0 }.map(\.1))
         let conversionSeconds = Date().timeIntervalSince(conversionStart)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let previousManifest = try? JSONFile.read(FilterListManifest.self, from: dir.appendingPathComponent("manifest.json"))
         var chunks: [Chunk] = []
         for content in output.chunks {
             let digest = SHA256.hash(data: Data(content.utf8)).map { String(format: "%02x", $0) }.joined()
@@ -268,21 +276,40 @@ public struct FilterListManifest: Codable, Sendable {
             let count = (try JSONSerialization.jsonObject(with: Data(content.utf8)) as? [[String: Any]])?.count ?? 0
             chunks.append(Chunk(id: id, file: filename, rules: count))
         }
-        let retainedChunks = Set(chunks.map(\.file))
-        let existingFiles = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
-        for file in existingFiles where file.lastPathComponent.hasPrefix("angl-")
-            && file.pathExtension == "json"
-            && !retainedChunks.contains(file.lastPathComponent) {
-            try FileManager.default.removeItem(at: file)
+        // Content-hashed advanced files keep any active older generation immutable until the new
+        // manifest compiles and takes over (avoiding in-place truncation during background updates).
+        let advancedPrefix = FilterListConverter.ruleListIdentifier(prefix: "advanced", encoded: "safari26/1\n" + output.advancedRulesText)
+        let advancedRulesFile = "\(advancedPrefix).rules"
+        let advancedStorageFile = "\(advancedPrefix).storage"
+        let advancedIndexFile = "\(advancedPrefix).index"
+        let rulesURL = dir.appendingPathComponent(advancedRulesFile)
+        let storageURL = dir.appendingPathComponent(advancedStorageFile)
+        let indexURL = dir.appendingPathComponent(advancedIndexFile)
+        if !FileManager.default.fileExists(atPath: rulesURL.path) {
+            try output.advancedRulesText.write(to: rulesURL, atomically: true, encoding: .utf8)
         }
-        let advancedRulesFile = "advanced.rules"
-        let advancedStorageFile = "advanced.storage"
-        let advancedIndexFile = "advanced.index"
-        try output.advancedRulesText.write(to: dir.appendingPathComponent(advancedRulesFile), atomically: true, encoding: .utf8)
-        let ruleLines = output.advancedRulesText.split(whereSeparator: \.isNewline).map(String.init)
-        let storage = try FilterRuleStorage(from: ruleLines, for: .safari26, fileURL: dir.appendingPathComponent(advancedStorageFile))
-        let engine = try FilterEngine(storage: storage)
-        try engine.write(to: dir.appendingPathComponent(advancedIndexFile))
+        if !FileManager.default.fileExists(atPath: storageURL.path) || !FileManager.default.fileExists(atPath: indexURL.path) {
+            let tmpStorage = dir.appendingPathComponent(".\(advancedStorageFile).tmp-\(UUID().uuidString)")
+            let tmpIndex = dir.appendingPathComponent(".\(advancedIndexFile).tmp-\(UUID().uuidString)")
+            defer {
+                try? FileManager.default.removeItem(at: tmpStorage)
+                try? FileManager.default.removeItem(at: tmpIndex)
+            }
+            let ruleLines = output.advancedRulesText.split(whereSeparator: \.isNewline).map(String.init)
+            let storage = try FilterRuleStorage(from: ruleLines, for: .safari26, fileURL: tmpStorage)
+            let engine = try FilterEngine(storage: storage)
+            try engine.write(to: tmpIndex)
+            if FileManager.default.fileExists(atPath: storageURL.path) {
+                _ = try FileManager.default.replaceItemAt(storageURL, withItemAt: tmpStorage)
+            } else {
+                try FileManager.default.moveItem(at: tmpStorage, to: storageURL)
+            }
+            if FileManager.default.fileExists(atPath: indexURL.path) {
+                _ = try FileManager.default.replaceItemAt(indexURL, withItemAt: tmpIndex)
+            } else {
+                try FileManager.default.moveItem(at: tmpIndex, to: indexURL)
+            }
+        }
 
         let manifest = FilterListManifest(
             generated: Date(), skipped: output.skipped, chunks: chunks,
@@ -292,6 +319,23 @@ public struct FilterListManifest: Codable, Sendable {
             failed: enabled.indices.filter { i in !downloaded.contains { $0.0 == i } }.map { enabled[$0].name }
         )
         try JSONFile.write(manifest, to: dir.appendingPathComponent("manifest.json"))
+
+        // Retain the new generation plus the immediately preceding generation (in case a running
+        // browser is still using it while chunks compile); prune any older artifacts.
+        var retained = Set(chunks.map(\.file)).union([advancedRulesFile, advancedStorageFile, advancedIndexFile])
+        if let prev = previousManifest {
+            retained.formUnion(prev.chunks.map(\.file))
+            retained.formUnion([prev.advancedRulesFile, prev.advancedStorageFile, prev.advancedIndexFile])
+        }
+        let existingFiles = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        for file in existingFiles {
+            let name = file.lastPathComponent
+            let isChunk = name.hasPrefix("angl-") && file.pathExtension == "json"
+            let isAdvanced = name.hasPrefix("advanced") && ["rules", "storage", "index"].contains(file.pathExtension)
+            if (isChunk || isAdvanced) && !retained.contains(name) {
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
         return manifest
     }
 

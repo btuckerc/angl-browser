@@ -53,4 +53,14 @@ final class FilterListConverterTests: XCTestCase {
         XCTAssertEqual(invocation.arguments, ["adPlacements"])
         XCTAssertTrue(unrelated.isEmpty)
     }
+
+    func testRuleListIdentifierHashesContentDeterministically() {
+        let a = FilterListConverter.ruleListIdentifier(prefix: "angl-fonts", encoded: FilterListConverter.fontBlockList())
+        let b = FilterListConverter.ruleListIdentifier(prefix: "angl-fonts", encoded: FilterListConverter.fontBlockList())
+        let c = FilterListConverter.ruleListIdentifier(prefix: "angl-fonts", encoded: "[]")
+        XCTAssertEqual(a, b)
+        XCTAssertNotEqual(a, c)
+        XCTAssertTrue(a.hasPrefix("angl-fonts-"))
+        XCTAssertEqual(a.count, "angl-fonts-".count + 12)
+    }
 }

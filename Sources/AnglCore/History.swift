@@ -54,7 +54,7 @@ public final class HistoryStore: @unchecked Sendable {
             throw NSError(domain: "History", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
         }
         db = connection
-        let sql = "PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS visits (url TEXT PRIMARY KEY, title TEXT, last_visit REAL, visit_count INTEGER, typed_count INTEGER); CREATE INDEX IF NOT EXISTS visits_last_visit ON visits(last_visit); CREATE TABLE IF NOT EXISTS recovery (id TEXT PRIMARY KEY, reason TEXT NOT NULL, created_at REAL NOT NULL, url TEXT NOT NULL, title TEXT NOT NULL, payload BLOB NOT NULL)"
+        let sql = "PRAGMA journal_mode=WAL; PRAGMA journal_size_limit=1048576; CREATE TABLE IF NOT EXISTS visits (url TEXT PRIMARY KEY, title TEXT, last_visit REAL, visit_count INTEGER, typed_count INTEGER); CREATE INDEX IF NOT EXISTS visits_last_visit ON visits(last_visit); CREATE TABLE IF NOT EXISTS recovery (id TEXT PRIMARY KEY, reason TEXT NOT NULL, created_at REAL NOT NULL, url TEXT NOT NULL, title TEXT NOT NULL, payload BLOB NOT NULL)"
         guard sqlite3_exec(connection, sql, nil, nil, nil) == SQLITE_OK else {
             let message = String(cString: sqlite3_errmsg(connection))
             sqlite3_close(connection)
@@ -96,8 +96,12 @@ public final class HistoryStore: @unchecked Sendable {
         queue.async { [self] in run(sql, values) }
     }
 
-    /// Waits for queued writes (normal quit).
-    public func flush() { queue.sync {} }
+    /// Waits for queued writes and truncates the WAL (normal quit).
+    public func flush() {
+        queue.sync {
+            if let db { sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, nil) }
+        }
+    }
 
     /// Records an HTTP(S) visit asynchronously; unsupported schemes are ignored.
     public func record(url: URL, title: String?, typed: Bool) {

@@ -57,9 +57,11 @@ final class Browser {
         theme = load("theme.json", Theme()) { try Theme.load(from: paths.themeFile) }
         Commands.noteRadius(theme.radius)
         style = Browser.style(for: theme)
-        var ws = load("workspaces.json", WorkspaceConfig.initial()) {
-            try JSONFile.read(WorkspaceConfig.self, from: paths.workspacesFile) ?? WorkspaceConfig.initial()
+        let loadedWS = load("workspaces.json", nil as WorkspaceConfig?) {
+            try JSONFile.read(WorkspaceConfig.self, from: paths.workspacesFile)
         }
+        var ws = loadedWS ?? WorkspaceConfig.initial()
+        let beforeRepair = ws
         ws.repair(theme: theme)
         workspaces = ws
         sites = load("sites.json", SiteStore()) { try SiteStore.load(from: paths.sitesFile) }
@@ -69,7 +71,9 @@ final class Browser {
         web = WebEnvironment(paths: paths)
         downloads = Downloads(paths: paths)
         self.problems = problems
-        try? JSONFile.write(workspaces, to: paths.workspacesFile)
+        if loadedWS == nil || ws != beforeRepair {
+            try? JSONFile.write(workspaces, to: paths.workspacesFile)
+        }
     }
 
     func start() {
@@ -121,6 +125,10 @@ final class Browser {
 
     /// Open URLs handed to us by the system (default browser, `open -a angl URL`).
     func open(urls: [URL]) {
+        if urls.contains(where: { u in
+            guard ["http", "https"].contains(u.scheme?.lowercased() ?? "") else { return false }
+            return policy(for: u).blocker && settings.blocking.lists.contains(where: \.enabled)
+        }) { web.blocker.prepare() }
         let w = frontWindow ?? newWindow()
         for u in urls { w.openTab(u, activate: true) }
         w.window?.makeKeyAndOrderFront(nil)

@@ -61,6 +61,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// Create the web view (restoring back/forward state when we have it) and start loading.
     func load() {
         guard webView == nil else { return }
+        if let u = node.url { prepareBlockerIfNeeded(for: u) }
         let wv = makeWebView(configuration: nil)
         // File pages load fresh: restored back/forward state carries no file read access, and WebKit
         // kills the WebContent process over it (a crash on every reload).
@@ -75,6 +76,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
         // Persist now: KVO later sees the same URL, and a load that never finishes has no didFinish.
         if node.url != url { browser.markSessionDirty() }
         node.url = url
+        prepareBlockerIfNeeded(for: url)
         if webView == nil { _ = makeWebView(configuration: nil) }
         if url.isFileURL {
             webView?.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
@@ -135,7 +137,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
         wv.underPageBackgroundColor = browser.style.base
         wv.setValue(false, forKey: "drawsBackground")
         webView = wv
-        installHandlers(isInternal: false)
+        installHandlers(isInternal: false, isTwitch: false)
         observers = [
             wv.observe(\.title, options: [.new]) { [weak self] wv, _ in
                 MainActor.assumeIsolated {
@@ -217,7 +219,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// Element muting in volume.js, only when WebKit can't mute the page.
     private var scriptMuted: Bool { muted && !Tab.nativeMute }
 
-    private func installHandlers(isInternal: Bool) {
+    private func installHandlers(isInternal: Bool, isTwitch: Bool) {
         guard let c = webView?.configuration.userContentController else { return }
         c.removeAllScriptMessageHandlers()
         let proxy = WeakScriptHandler(self)
@@ -226,12 +228,20 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
             c.add(Passwords.shared, contentWorld: Passwords.world, name: Passwords.handlerName)
         }
         c.addScriptMessageHandler(PasskeyBridge.shared, contentWorld: .page, name: PasskeyBridge.name)
-        if browser.settings.twitch.emotes {
-            c.addScriptMessageHandler(TwitchEmoteBridge(), contentWorld: WKContentWorld.world(name: "angl-twitch"), name: "anglTwitchEmotes")
+        if isTwitch && browser.settings.twitch.emotes {
+            c.addScriptMessageHandler(TwitchEmoteBridge.shared, contentWorld: InjectedScripts.twitchWorld, name: "anglTwitchEmotes")
         }
         if isInternal { c.addScriptMessageHandler(PageBridge.shared, contentWorld: .page, name: PageBridge.name) }
         if browser.settings.content.fullscreen != .native {
             c.addScriptMessageHandler(FullscreenBridge(self), contentWorld: InjectedScripts.world, name: FullscreenBridge.name)
+        }
+    }
+
+    private func prepareBlockerIfNeeded(for url: URL) {
+        guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return }
+        let p = browser.policy(for: url)
+        if p.blocker && browser.settings.blocking.lists.contains(where: \.enabled) {
+            browser.web.blocker.prepare()
         }
     }
 
@@ -243,6 +253,7 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
         policy = p
         guard let c = webView?.configuration.userContentController else { return p }
         let isInternal = url.scheme == InternalPages.scheme
+        let isTwitch = InjectedScripts.isTwitch(url)
         let twitch = browser.settings.twitch
         let advancedEnabled = browser.settings.blocking.advanced && p.blocker
         let content = browser.settings.content
@@ -262,12 +273,12 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
         }
         nightAudioInstalled = nightAudio && p.javascript
         youtubeFramesInstalled = youtubeFrames && InjectedScripts.isYouTube(url)
-        let handlers = "\(isInternal)|\(Passwords.shared.enabled)|\(twitch.emotes)|\(content.fullscreen != .native)"
+        let handlers = "\(isInternal)|\(isTwitch)|\(Passwords.shared.enabled)|\(twitch.emotes)|\(content.fullscreen != .native)"
         if handlers != applied.handlers {
             applied.handlers = handlers
             // Without the bridge the open page could no longer say it left: end it first.
             if content.fullscreen == .native { owner.endPageFullscreen(of: self, tellPage: true) }
-            installHandlers(isInternal: isInternal)
+            installHandlers(isInternal: isInternal, isTwitch: isTwitch)
         }
         return p
     }
@@ -277,7 +288,24 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
         let hadNightAudio = nightAudioInstalled
         let hadYouTubeFrames = youtubeFramesInstalled
         applied = Applied()
-        if let u = webView?.url { _ = applyPolicy(for: u) }
+        if let u = webView?.url {
+            if ["http", "https"].contains(u.scheme?.lowercased() ?? "") {
+                let p = browser.policy(for: u)
+                let blocker = browser.web.blocker
+                let needMain = p.blocker && browser.settings.blocking.lists.contains(where: \.enabled) && blocker.lists.isEmpty
+                let needFonts = p.blockRemoteFonts && blocker.fontList == nil
+                let needYouTube = browser.settings.content.youtubeFrames && InjectedScripts.isYouTube(u) && blocker.youtubeList == nil
+                if needMain || needFonts || needYouTube {
+                    Task { @MainActor [weak self] in
+                        await blocker.waitUntilReady(mainLists: needMain, fonts: needFonts, youtube: needYouTube)
+                        guard let self, let cur = self.webView?.url else { return }
+                        self.applied.lists = nil
+                        _ = self.applyPolicy(for: cur)
+                    }
+                }
+            }
+            _ = applyPolicy(for: u)
+        }
         // Night audio follows the switch in the open page too. Off hands back native audio at once;
         // on resumes a script that is already there, or installs it for the page's next video (the
         // current one's audio was appended unseen).
@@ -449,6 +477,16 @@ final class Tab: NSObject, WKNavigationDelegate, WKUIDelegate {
                     webView.load(URLRequest(url: clean))
                     return (.cancel, preferences)
                 }
+            }
+        }
+        if web {
+            let p = browser.policy(for: url)
+            let needsMain = p.blocker && browser.settings.blocking.lists.contains(where: \.enabled)
+            let needsFonts = p.blockRemoteFonts
+            let needsYouTube = browser.settings.content.youtubeFrames && InjectedScripts.isYouTube(url)
+            if needsMain || needsFonts || needsYouTube {
+                await browser.web.blocker.waitUntilReady(mainLists: needsMain, fonts: needsFonts, youtube: needsYouTube)
+                guard self.webView === webView else { return (.cancel, preferences) }
             }
         }
         let p = applyPolicy(for: url)

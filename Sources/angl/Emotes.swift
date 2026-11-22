@@ -141,6 +141,8 @@ final class EmoteService {
 
 @MainActor
 final class TwitchEmoteBridge: NSObject, WKScriptMessageHandlerWithReply {
+    static let shared = TwitchEmoteBridge()
+
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage,
                                replyHandler: @escaping @MainActor @Sendable (Any?, String?) -> Void) {
         guard message.frameInfo.securityOrigin.protocol == "https", ["twitch.tv", "www.twitch.tv", "m.twitch.tv"].contains(message.frameInfo.securityOrigin.host),
