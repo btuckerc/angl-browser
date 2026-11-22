@@ -110,7 +110,7 @@ code,
 /* Multi-section page rail */
 .layout {
   display: grid;
-  grid-template-columns: 180px minmax(0, 1fr);
+  grid-template-columns: 200px minmax(0, 1fr);
   min-height: 100vh;
 }
 
@@ -130,7 +130,7 @@ code,
 .wordmark {
   font-size: 16px;
   font-weight: 700;
-  margin: 0 8px 20px;
+  margin: 0 10px 18px;
 }
 
 .wordmark::after {
@@ -142,15 +142,27 @@ code,
   margin-left: 4px;
 }
 
+.rail nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .rail a {
   display: block;
-  padding: 6px 8px;
+  padding: 6px 10px;
+  line-height: 1.35;
   border-radius: min(var(--radius, 0px), 4px);
   color: var(--fg-secondary, #a3a29f);
   text-decoration: none;
+  transition: background-color 100ms, color 100ms;
 }
 
-.rail a:hover,
+.rail a:hover {
+  background: var(--bg-raised, #242424);
+  color: var(--fg-primary, #deddda);
+}
+
 .rail a.active {
   background: var(--bg-selected, #303030);
   color: var(--fg-primary, #deddda);
@@ -394,6 +406,8 @@ small,
 
   .rail nav {
     display: flex;
+    flex-direction: row;
+    gap: 4px;
     overflow: auto;
   }
 

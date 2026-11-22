@@ -496,14 +496,18 @@ function makeControl(item, kind, { id, labelID, describedBy }) {
   }
   if (kind === 'corners') {
     const select = el('select', aria, ...item.options.map(([value, text]) => el('option', { value: String(value) }, text)));
-    const custom = el('option', { hidden: true, disabled: true });
-    select.append(custom);
+    const custom = el('option', { disabled: true });
     select.addEventListener('change', () => commit(Number(select.value), () => set(current())));
     const set = (v) => {
       const n = Number(v);
       const match = item.options.some(([opt]) => Number(opt) === n);
-      custom.hidden = match;
-      if (!match) { custom.value = String(n); custom.textContent = `Custom (${n} pt)`; }
+      if (match) {
+        custom.remove();
+      } else {
+        custom.value = String(n);
+        custom.textContent = `Custom (${n} pt)`;
+        if (!custom.isConnected) select.append(custom);
+      }
       select.value = String(n);
     };
     return { element: select, set };

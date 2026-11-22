@@ -146,13 +146,26 @@ body.settings-page {
 
 .settings-page .rail a {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
+  padding: 6px 10px;
   text-decoration: none;
   border-radius: var(--small-radius);
 }
 
-.settings-page .rail a[aria-current="location"] {
+.settings-page .rail a > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-page .rail a:focus-visible {
+  outline-offset: -1px;
+}
+
+.settings-page .rail a[aria-current="location"],
+.settings-page .rail a[aria-current="location"]:hover {
   background: var(--bg-selected, #303030);
   color: var(--fg-primary, #deddda);
   box-shadow: inset 2px 0 0 var(--fg-primary, #deddda);
@@ -163,11 +176,14 @@ body.settings-page {
 }
 
 .settings-page .rail .count {
+  flex-shrink: 0;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
+  color: var(--fg-secondary, #a3a29f);
 }
 
 .settings-page .rail a.external {
-  margin-top: 16px;
+  margin-top: 14px;
 }
 
 .settings-page .rail a.external + a.external {
@@ -717,8 +733,13 @@ body.settings-page {
 
   .settings-page .rail nav {
     display: flex;
+    flex-direction: row;
     flex-wrap: wrap;
-    gap: 2px;
+    gap: 4px;
+  }
+
+  .settings-page .rail a.external {
+    margin-top: 0;
   }
 
   .settings-page main {
