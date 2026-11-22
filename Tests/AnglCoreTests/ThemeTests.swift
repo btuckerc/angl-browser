@@ -114,4 +114,26 @@ final class ThemeTests: XCTestCase {
         XCTAssertEqual(try Theme.layered(user: ["color": ["accent": "#ffffff"]]).resolved(dark: true).color.accent, "#ffffff")
         XCTAssertEqual(Theme().resolved(dark: false).color.accent, Theme.Colors.light.accent)
     }
+
+    func testRadiusAndGlassDefaultsAndOverrides() throws {
+        let def = Theme()
+        XCTAssertEqual(def.radius, 8)
+        XCTAssertTrue(def.window.glass)
+        XCTAssertTrue(def.cssVariables.contains("--radius: 8.0px;"))
+
+        let sharp = try Theme.layered(user: ["radius": 0, "window": ["glass": false]])
+        XCTAssertEqual(sharp.radius, 0)
+        XCTAssertFalse(sharp.window.glass)
+        XCTAssertTrue(sharp.cssVariables.contains("--radius: 0.0px;"))
+
+        // Legacy theme.json omitting radius and glass gets the defaults; negative radius clamps to 0 in CSS.
+        let legacy = try Theme.layered(user: ["window": ["address": "palette", "newTab": "mark"]])
+        XCTAssertEqual(legacy.radius, 8)
+        XCTAssertTrue(legacy.window.glass)
+        XCTAssertEqual(legacy.window.newTab, .mark)
+
+        let negative = try Theme.layered(user: ["radius": -4])
+        XCTAssertEqual(negative.radius, 0)
+        XCTAssertTrue(negative.cssVariables.contains("--radius: 0.0px;"))
+    }
 }

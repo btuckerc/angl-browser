@@ -34,6 +34,7 @@ final class PaletteView: FlatView, NSTextFieldDelegate {
         field.usesSingleLineMode = true; field.cell?.isScrollable = true; field.cell?.wraps = false
         field.placeholderString = "search or address (> for commands)"; field.delegate = self
         field.setAccessibilityLabel("Address, search or command")
+        list.embedded = true
         addSubview(field); addSubview(list)
         list.onPick = { [weak self] i in self?.commitSuggestion(i) }
         if docked {
@@ -125,7 +126,11 @@ final class PaletteView: FlatView, NSTextFieldDelegate {
     private func focusChanged() {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.borderColor = self.docked && !self.editing ? self.owner.style.border : self.owner.style.accent
+            if !self.docked, self.owner.style.glass {
+                self.borderColor = nil
+            } else {
+                self.borderColor = self.docked && !self.editing ? self.owner.style.border : self.owner.style.accent
+            }
         }
         caret?.update()
     }
@@ -173,7 +178,11 @@ final class PaletteView: FlatView, NSTextFieldDelegate {
 
     func applyStyle() {
         let s = owner.style
-        fill = s.raised
+        cornerRadius = s.radius
+        let glassPanel = !docked && s.glass
+        fill = glassPanel ? nil : s.raised
+        edges = glassPanel ? [] : .all
+        borderColor = glassPanel ? nil : (docked && !editing ? s.border : s.accent)
         field.font = s.monoLarge; field.textColor = s.primary
         (field.cell as? PromptCell)?.prompt = docked && owner.browser.theme.window.caret == .block ? s : nil
         caret?.color = s.accent
@@ -193,9 +202,9 @@ final class PalettePanel: NSPanel {
         self.owner = owner
         view = PaletteView(owner: owner, docked: false)
         super.init(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
-        isOpaque = true; backgroundColor = owner.style.raised; hasShadow = true; level = .floating
+        hasShadow = true; level = .floating
         isReleasedWhenClosed = false
-        contentView = view
+        applyPanelSurface(self, body: view, style: owner.style)
         view.onClose = { [weak self] in self?.closePalette() }
         view.onResize = { [weak self] in self?.fit() }
         NotificationCenter.default.addObserver(self, selector: #selector(windowResigned), name: NSWindow.didResignKeyNotification, object: self)
@@ -230,13 +239,16 @@ final class PalettePanel: NSPanel {
                                y: (screenRect.maxY - height - parent.frame.height * 0.18).rounded()))
         parent.addChildWindow(self, ordered: .above)
         makeKeyAndOrderFront(nil); makeFirstResponder(view.field)
+        invalidateShadow()
     }
 
     /// Grow downward from a fixed top edge so the input row never moves while typing.
     private func fit() {
         guard isVisible else { return }
         let h = view.height
+        guard abs(frame.height - h) > 0.5 else { return }
         setFrame(NSRect(x: frame.minX, y: frame.maxY - h, width: frame.width, height: h), display: true)
+        invalidateShadow()
     }
 
     func closePalette() {
@@ -247,7 +259,7 @@ final class PalettePanel: NSPanel {
     func bookmarksChanged() { if isVisible { view.bookmarksChanged() } }
 
     func applyStyle() {
-        backgroundColor = owner.style.raised
+        applyPanelSurface(self, body: view, style: owner.style)
         view.applyStyle()
     }
 }
@@ -429,7 +441,6 @@ final class SidebarPaletteHeader: FlatView, NSGestureRecognizerDelegate {
         for v in [back, forward, reload, hide, pill] { addSubview(v) }
         pill.addSubview(square); pill.addSubview(url); pill.addSubview(site)
         back.toolTip = "Back (⌘[)"; forward.toolTip = "Forward (⌘])"; reload.toolTip = "Reload (⌘R)"
-        hide.toolTip = "Hide sidebar (⇧⌘L)"
         site.toolTip = "Site settings (⇧⌘I)"
         back.action = { [weak self] in self?.owner?.active?.webView?.goBack() }
         forward.action = { [weak self] in self?.owner?.active?.webView?.goForward() }
@@ -451,17 +462,22 @@ final class SidebarPaletteHeader: FlatView, NSGestureRecognizerDelegate {
     }
     func applyStyle() {
         guard let o = owner else { return }; fill = o.style.sidebar
-        for b in [back, forward, reload, hide, site] { b.tint = o.style.secondary; b.hoverFill = o.style.raised }
+        for b in [back, forward, reload, hide, site] {
+            b.tint = o.style.secondary; b.hoverFill = o.style.raised; b.cornerRadius = o.style.smallRadius
+        }
+        let sidebarKey = Commands.sidebarShortcutLabel
+        let keySuffix = sidebarKey.isEmpty ? "" : " (\(sidebarKey))"
         hide.image = o.style.symbol("sidebar.left")
-        hide.toolTip = o.sidebarHidden ? "Keep sidebar open (⇧⌘L)" : "Hide sidebar (⇧⌘L)"
+        hide.toolTip = (o.sidebarHidden ? "Keep sidebar open" : "Hide sidebar") + keySuffix
         back.isEnabled = o.active?.webView?.canGoBack ?? false
         forward.isEnabled = o.active?.webView?.canGoForward ?? false
         back.image = o.style.symbol("chevron.left"); forward.image = o.style.symbol("chevron.right")
         reload.image = o.style.symbol(o.active?.isLoading == true ? "xmark" : "arrow.clockwise")
         reload.toolTip = o.active?.isLoading == true ? "Stop (⌘.)" : "Reload (⌘R)"
         reload.isEnabled = o.active != nil
-        pill.fill = o.style.raised; pill.borderColor = o.style.border; pill.edges = .all
+        pill.fill = o.style.raised; pill.borderColor = o.style.border; pill.edges = .all; pill.cornerRadius = o.style.smallRadius
         square.fill = o.style.workspaceColor(o.active?.container.color ?? o.workspace.color)
+        square.cornerRadius = o.style.tinyRadius
         site.image = o.style.symbol("gearshape", size: o.style.glyph - 3)
         let text = o.active?.url.map(Omnibox.display) ?? ""
         // One line, cut with an ellipsis: without the paragraph style the label word-wraps at "/" and the

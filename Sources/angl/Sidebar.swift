@@ -344,6 +344,7 @@ final class SidebarView: FlatView, NSOutlineViewDataSource, NSOutlineViewDelegat
         cell.badge.textColor = s.secondary
         cell.close.tint = s.secondary
         cell.close.hoverFill = s.selected
+        cell.close.cornerRadius = s.tinyRadius
         cell.close.image = s.symbol("xmark", size: 9, weight: .semibold)
         if n.isFolder {
             cell.title.stringValue = n.title
@@ -541,6 +542,7 @@ final class TabOutlineView: NSOutlineView {
         guard window?.firstResponder === self, event.charactersIgnoringModifiers?.lowercased() == "g",
               event.modifierFlags.contains(.command) else { return super.performKeyEquivalent(with: event) }
         return MainActor.assumeIsolated {
+            if Commands.isClaimedByOverride(event) { return false }
             guard let sidebar, let owner else { return false }
             if event.modifierFlags.contains(.shift) {
                 for n in sidebar.selectedNodes where n.isFolder { owner.ungroup(n) }
@@ -593,26 +595,23 @@ final class TabRowView: NSTableRowView {
 
     override func drawBackground(in dirtyRect: NSRect) {
         guard let s = style else { return }
-        if isActiveTab {
-            s.selected.setFill(); bounds.fill()
-            s.accent.setFill(); NSRect(x: 0, y: 0, width: 2, height: bounds.height).fill()
-        } else if isSplitPartner {
-            s.selected.setFill(); bounds.fill()
-            s.muted.setFill(); NSRect(x: 0, y: 0, width: 2, height: bounds.height).fill()
-        } else if hovering {
-            s.raised.setFill(); bounds.fill()
+        let bar = isActiveTab ? s.accent : (containerColor ?? (isSplitPartner ? s.muted : nil))
+        let fill: NSColor? = (isActiveTab || isSplitPartner) ? s.selected : hovering ? s.raised : nil
+        if fill != nil || bar != nil {
+            fillRowPill(bounds, fill: fill, bar: bar, radius: s.smallRadius)
         }
-        if let c = containerColor, !isActiveTab { c.setFill(); NSRect(x: 0, y: 0, width: 2, height: bounds.height).fill() }
     }
 
     override func drawSelection(in dirtyRect: NSRect) {
         guard let s = style else { return }
         if isActiveTab { drawBackground(in: dirtyRect); return }
-        s.raised.setFill(); bounds.fill()
-        s.border.setFill(); NSRect(x: 0, y: 0, width: 2, height: bounds.height).fill()
+        fillRowPill(bounds, fill: s.raised, bar: containerColor ?? s.border, radius: s.smallRadius)
         if keyboardFocus {
             s.accent.setStroke()
-            NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5)).stroke()
+            let r = s.smallRadius > 0 ? bounds.insetBy(dx: 5.5, dy: 1.5) : bounds.insetBy(dx: 0.5, dy: 0.5)
+            let cr = s.smallRadius > 0 ? max(0, s.smallRadius - 0.5) : 0
+            let path = cr > 0 ? NSBezierPath(roundedRect: r, xRadius: cr, yRadius: cr) : NSBezierPath(rect: r)
+            path.stroke()
         }
     }
 }
@@ -722,21 +721,24 @@ final class WorkspaceStrip: NSView, NSViewToolTipOwner {
         MainActor.assumeIsolated {
             let s = owner.style
             let all = workspaces
+            let cr = s.tinyRadius
             for (i, w) in all.enumerated() {
                 let r = rect(i)
                 let active = w.id == owner.workspaceID
                 s.workspaceColor(w.color).withAlphaComponent(active || dropIndex == i ? 1 : 0.45).setFill()
-                r.fill()
+                if cr > 0 { NSBezierPath(roundedRect: r, xRadius: cr, yRadius: cr).fill() } else { r.fill() }
                 if active || dropIndex == i {
                     s.primary.setStroke()
-                    let p = NSBezierPath(rect: r.insetBy(dx: -1.5, dy: -1.5))
+                    let ring = r.insetBy(dx: -1.5, dy: -1.5)
+                    let p = cr > 0 ? NSBezierPath(roundedRect: ring, xRadius: cr + 1, yRadius: cr + 1) : NSBezierPath(rect: ring)
                     p.lineWidth = 1
                     p.stroke()
                 }
             }
             let box = rect(all.count)
             s.muted.setStroke()
-            NSBezierPath(rect: box.insetBy(dx: 0.5, dy: 0.5)).stroke()
+            let boxRect = box.insetBy(dx: 0.5, dy: 0.5)
+            (cr > 0 ? NSBezierPath(roundedRect: boxRect, xRadius: max(0, cr - 0.5), yRadius: max(0, cr - 0.5)) : NSBezierPath(rect: boxRect)).stroke()
             // "+" glyph centred in the new-workspace square.
             let plus = NSBezierPath()
             let mid = box.minX + box.width / 2, midY = box.minY + box.height / 2, arm: CGFloat = 3
@@ -790,7 +792,9 @@ final class WorkspaceStrip: NSView, NSViewToolTipOwner {
 
     func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
         guard let i = index(at: point) else { return "" }
-        return i < workspaces.count ? "\(workspaces[i].name) (⌃\(i + 1))" : "New Space"
+        guard i < workspaces.count else { return "New Space" }
+        let label = i < 9 ? MainActor.assumeIsolated { Commands.chord("ws.\(i + 1)")?.label } : nil
+        return label.flatMap { $0.isEmpty ? nil : "\(workspaces[i].name) (\($0))" } ?? workspaces[i].name
     }
 
     override func layout() {
@@ -814,7 +818,7 @@ final class WorkspaceStrip: NSView, NSViewToolTipOwner {
         var items = workspaces.enumerated().map { i, w in
             let e = PressableElement(.radioButton, w.name, in: self)
             e.setAccessibilityValue(w.id == o.workspaceID ? 1 : 0)
-            if i < 9 { e.setAccessibilityHelp("⌃\(i + 1)") }
+            if i < 9, let label = Commands.chord("ws.\(i + 1)")?.label, !label.isEmpty { e.setAccessibilityHelp(label) }
             // Weak: the cache lives in this view, so a strong owner here keeps a closed window alive.
             e.press = { [weak self] in self?.owner.switchWorkspace(index: i); return self != nil }
             return e
@@ -885,8 +889,7 @@ final class PinnedRows: NSView, NSViewToolTipOwner {
                 let t = owner.liveTab(n)
                 let active = owner.active?.node === n
                 if active {
-                    s.selected.setFill(); r.fill()
-                    s.accent.setFill(); NSRect(x: r.minX, y: r.minY, width: 2, height: r.height).fill()
+                    fillRowPill(r, fill: s.selected, bar: s.accent, radius: s.smallRadius)
                 }
                 let loaded = t?.isLoaded == true || active
                 let img = t?.favicon ?? Tab.storedFavicon(for: n.url) ?? s.symbol("globe", tint: s.muted)

@@ -156,6 +156,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         on(.anglPower) { w in
             for (_, t) in w.tabs { if let p = t.webView?.configuration.preferences { w.browser.web.applyRenderingRate(to: p) } }
         }
+        on(.anglKeys) { w in
+            w.navBar.applyStyle()
+            w.sidebar.updatePaletteHeader()
+            w.refreshPageKeys()
+        }
     }
 
     // MARK: Tabs
@@ -922,6 +927,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
             return
         }
         let panel = SitePanel(owner: self, tab: t)
+        panel.onClose = { [weak self, weak panel] in
+            if self?.sitePanel === panel { self?.sitePanel = nil }
+        }
         sitePanel = panel
         panel.show(below: siteButtonRectOnScreen)
     }
@@ -1002,6 +1010,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func toggleSidebar() {
+        peekTimer?.invalidate()
+        peekTimer = nil
         sidebarHidden.toggle()
         peeking = false
         sidebar.updatePaletteHeader()
@@ -1130,8 +1140,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         layoutContentPanes()
         status.reposition(in: content.bounds)
         updateProgressLine()
-        content.layer?.cornerRadius = inset > 0 ? 4 : 0
+        content.layer?.cornerRadius = inset > 0 ? style.radius : 0
         content.layer?.masksToBounds = inset > 0
+        contentFrame.cornerRadius = style.radius
         contentFrame.frame = NSRect(x: contentX, y: navH + inset, width: max(0, bounds.width - contentX - inset), height: max(0, bounds.height - navH - 2 * inset))
         configureOutline(fullScreen: fullScreen)
 
@@ -1164,6 +1175,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         permissionBar.applyStyle(s)
         status.applyStyle(s)
         blank.applyStyle(s)
+        if let p = sitePanel {
+            if p.isVisible { p.applyStyle() } else { sitePanel = nil }
+        }
         // The address palette only belongs to palette mode; the split chooser works in either and restyles in place.
         if !paletteMode, palette.isVisible, !palette.showsTabChooser { palette.closePalette() }
         progressLine.fill = s.accent
@@ -1175,6 +1189,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     private func refreshPageThemes() {
         for (_, t) in tabs where t.url?.scheme == InternalPages.scheme {
             t.webView?.evaluateJavaScript("window.anglEvent?.('theme')")
+        }
+    }
+
+    private func refreshPageKeys() {
+        for (_, t) in tabs where t.url?.scheme == InternalPages.scheme {
+            t.webView?.evaluateJavaScript("window.anglEvent?.('keys')")
         }
     }
 
@@ -1201,9 +1221,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
 final class ContentFrameView: NSView {
     var color: NSColor = .clear { didSet { needsDisplay = true } }
     var lineWidth: CGFloat = 1 { didSet { needsDisplay = true } }
+    var cornerRadius: CGFloat = 0 { didSet { if cornerRadius != oldValue { needsDisplay = true } } }
     override var isFlipped: Bool { true }
     override func draw(_ dirtyRect: NSRect) {
-        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: lineWidth / 2, dy: lineWidth / 2), xRadius: 4, yRadius: 4)
+        let insetRect = bounds.insetBy(dx: lineWidth / 2, dy: lineWidth / 2)
+        let r = max(0, cornerRadius - lineWidth / 2)
+        let path = r > 0 ? NSBezierPath(roundedRect: insetRect, xRadius: r, yRadius: r) : NSBezierPath(rect: insetRect)
         path.lineWidth = lineWidth
         color.setStroke()
         path.stroke()

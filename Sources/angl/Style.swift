@@ -5,6 +5,8 @@ import AppKit
 @MainActor
 struct Style {
     let theme: Theme
+    /// Active Liquid Glass on floating panels (macOS 26+, enabled in theme, and neither Reduce Transparency nor Increase Contrast active).
+    let glass: Bool
 
     let base: NSColor, sidebar: NSColor, raised: NSColor, selected: NSColor
     let primary: NSColor, secondary: NSColor, muted: NSColor
@@ -16,9 +18,13 @@ struct Style {
     var row: CGFloat { theme.metrics.row }
     var indent: CGFloat { theme.metrics.indent }
     var glyph: CGFloat { theme.metrics.glyph }
+    var radius: CGFloat { max(0, CGFloat(theme.radius)) }
+    var smallRadius: CGFloat { radius > 0 ? min(radius, 5) : 0 }
+    var tinyRadius: CGFloat { radius > 0 ? min(radius, 3) : 0 }
 
-    init(_ theme: Theme) {
+    init(_ theme: Theme, glass: Bool = false) {
         self.theme = theme
+        self.glass = glass
         let c = theme.color
         base = Style.color(c.bg.base); sidebar = Style.color(c.bg.sidebar)
         raised = Style.color(c.bg.raised); selected = Style.color(c.bg.selected)
@@ -82,22 +88,88 @@ func contrast(_ a: NSColor, _ b: NSColor) -> Double {
     return contrastRatio(hex(a), hex(b)) ?? 21
 }
 
-/// A flat view with a solid background and optional hairlines. No layers tricks, no vibrancy.
+/// A flat view with a solid background, optional corner radius and optional hairlines.
 class FlatView: NSView {
     var fill: NSColor? { didSet { if fill != oldValue { needsDisplay = true } } }
     var borderColor: NSColor? { didSet { if borderColor != oldValue { needsDisplay = true } } }
     var edges: NSRectEdge.Set = [] { didSet { if edges != oldValue { needsDisplay = true } } }
+    var cornerRadius: CGFloat = 0 { didSet { if cornerRadius != oldValue { needsDisplay = true } } }
 
     override var isFlipped: Bool { true }
 
     override func draw(_ dirtyRect: NSRect) {
-        if let fill { fill.setFill(); bounds.fill() }
+        let r = min(cornerRadius, min(bounds.width, bounds.height) / 2)
+        if let fill {
+            fill.setFill()
+            if r > 0 { NSBezierPath(roundedRect: bounds, xRadius: r, yRadius: r).fill() } else { bounds.fill() }
+        }
         guard let borderColor, !edges.isEmpty else { return }
+        if r > 0, edges == .all {
+            borderColor.setStroke()
+            let sr = max(0, r - 0.5)
+            let p = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: sr, yRadius: sr)
+            p.lineWidth = 1
+            p.stroke()
+            return
+        }
         borderColor.setFill()
         if edges.contains(.top) { NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill() }
         if edges.contains(.bottom) { NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill() }
         if edges.contains(.left) { NSRect(x: 0, y: 0, width: 1, height: bounds.height).fill() }
         if edges.contains(.right) { NSRect(x: bounds.width - 1, y: 0, width: 1, height: bounds.height).fill() }
+    }
+}
+
+/// Hosts a floating panel's `body` in an `NSGlassEffectView` when Liquid Glass is active,
+/// or directly as `panel.contentView` when solid. Safe to call repeatedly on live theme changes.
+@MainActor
+func applyPanelSurface(_ panel: NSPanel, body: NSView, style: Style) {
+    let transparent = style.glass || style.radius > 0
+    panel.isOpaque = !transparent
+    panel.backgroundColor = transparent ? .clear : style.raised
+    if #available(macOS 26.0, *), style.glass {
+        let glass = (panel.contentView as? NSGlassEffectView) ?? NSGlassEffectView()
+        glass.style = .regular
+        glass.cornerRadius = style.radius
+        glass.tintColor = style.raised.withAlphaComponent(0.84)
+        body.autoresizingMask = [.width, .height]
+        if glass.contentView !== body {
+            body.removeFromSuperview()
+            glass.contentView = body
+        }
+        if panel.contentView !== glass { panel.contentView = glass }
+        body.frame = glass.bounds
+    } else {
+        if #available(macOS 26.0, *), let glass = panel.contentView as? NSGlassEffectView {
+            glass.contentView = nil
+        }
+        body.autoresizingMask = [.width, .height]
+        if panel.contentView !== body {
+            body.removeFromSuperview()
+            panel.contentView = body
+        }
+    }
+    panel.invalidateShadow()
+}
+
+/// Fills a row pill (`smallRadius` inset horizontally when rounded, full-bleed when sharp),
+/// clipping an optional 2 pt leading accent bar cleanly inside the pill.
+func fillRowPill(_ rect: NSRect, fill: NSColor?, bar: NSColor?, radius: CGFloat) {
+    let r = radius > 0 ? rect.insetBy(dx: 5, dy: 1) : rect
+    let cr = radius > 0 ? min(radius, min(r.width, r.height) / 2) : 0
+    if cr > 0 {
+        let path = NSBezierPath(roundedRect: r, xRadius: cr, yRadius: cr)
+        if let fill { fill.setFill(); path.fill() }
+        if let bar {
+            NSGraphicsContext.saveGraphicsState()
+            path.addClip()
+            bar.setFill()
+            NSRect(x: r.minX, y: r.minY, width: 2, height: r.height).fill()
+            NSGraphicsContext.restoreGraphicsState()
+        }
+    } else {
+        if let fill { fill.setFill(); r.fill() }
+        if let bar { bar.setFill(); NSRect(x: r.minX, y: r.minY, width: 2, height: r.height).fill() }
     }
 }
 
@@ -116,6 +188,7 @@ final class GlyphButton: NSView {
     var text: String? { didSet { if text != oldValue { needsDisplay = true } } }
     var tint: NSColor = .white { didSet { if tint != oldValue { needsDisplay = true } } }
     var hoverFill: NSColor = .darkGray
+    var cornerRadius: CGFloat = 0 { didSet { if cornerRadius != oldValue { needsDisplay = true } } }
     var isEnabled = true { didSet { if isEnabled != oldValue { needsDisplay = true } } }
     var font: NSFont = .systemFont(ofSize: 12)
     private var hovering = false { didSet { needsDisplay = true } }
@@ -147,7 +220,11 @@ final class GlyphButton: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        if isEnabled, hovering || pressed { (pressed ? hoverFill.blended(withFraction: 0.3, of: .white) ?? hoverFill : hoverFill).setFill(); bounds.fill() }
+        if isEnabled, hovering || pressed {
+            (pressed ? hoverFill.blended(withFraction: 0.3, of: .white) ?? hoverFill : hoverFill).setFill()
+            let r = min(cornerRadius, min(bounds.width, bounds.height) / 2)
+            if r > 0 { NSBezierPath(roundedRect: bounds, xRadius: r, yRadius: r).fill() } else { bounds.fill() }
+        }
         let color = isEnabled ? tint : tint.withAlphaComponent(0.35)
         if let image {
             let tinted: NSImage

@@ -13,6 +13,7 @@ extension Notification.Name {
     static let anglUserCSS = Notification.Name("angl.usercss")
     static let anglBookmarks = Notification.Name("angl.bookmarks")
     static let anglPower = Notification.Name("angl.power")
+    static let anglKeys = Notification.Name("angl.keys")
 }
 
 /// Process-wide state for one profile: config, stores, WebKit environment, windows.
@@ -54,6 +55,7 @@ final class Browser {
         }
         settings = load("settings.json", Settings()) { try Settings.load(from: paths.settingsFile) }
         theme = load("theme.json", Theme()) { try Theme.load(from: paths.themeFile) }
+        Commands.noteRadius(theme.radius)
         style = Browser.style(for: theme)
         var ws = load("workspaces.json", WorkspaceConfig.initial()) {
             try JSONFile.read(WorkspaceConfig.self, from: paths.workspacesFile) ?? WorkspaceConfig.initial()
@@ -215,7 +217,7 @@ final class Browser {
         if web.reloadUserCSS() { post(.anglUserCSS) }
         let keys = Commands.overrides
         Commands.loadOverrides(paths)
-        if keys != Commands.overrides { NSApp.mainMenu = Commands.buildMainMenu() }
+        if keys != Commands.overrides { NSApp.mainMenu = Commands.buildMainMenu(); post(.anglKeys) }
         if !problems.isEmpty { frontWindow?.toast(problems.joined(separator: " · "), color: { $0.warn }) }
     }
 
@@ -228,10 +230,18 @@ final class Browser {
         case .system: NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         }
         let drawn = t.resolved(dark: dark)
-        return Style(NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast ? drawn.increasedContrast : drawn)
+        let increaseContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        let glass: Bool
+        if #available(macOS 26.0, *) {
+            glass = t.window.glass && !increaseContrast && !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+        } else {
+            glass = false
+        }
+        return Style(increaseContrast ? drawn.increasedContrast : drawn, glass: glass)
     }
 
     private func restyle() {
+        Commands.noteRadius(theme.radius)
         applyAppearance() // first: `system` reads the app's effective appearance
         style = Browser.style(for: theme)
         post(.anglTheme)

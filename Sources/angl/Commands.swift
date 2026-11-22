@@ -21,14 +21,27 @@ struct Command {
         self.needsWindow = needsWindow; self.run = run
     }
 
-    var chord: String { Commands.overrides[id] ?? defaultChord }
+    var chord: String {
+        guard menu != .none else { return "" }
+        if let override = Commands.overrides[id] { return override }
+        if let parsed = Chord(defaultChord),
+           Commands.claimedOverrideChords.contains(where: { $0.id != id && $0.chord == parsed }) {
+            return ""
+        }
+        return defaultChord
+    }
     var chordLabel: String { Chord(chord)?.label ?? "" }
 }
 
 /// "cmd+shift+t", "ctrl+tab", "cmd+opt+up". Parsed into an NSMenuItem key equivalent.
-struct Chord {
+struct Chord: Equatable {
     var key: String
     var modifiers: NSEvent.ModifierFlags
+
+    init(key: String, modifiers: NSEvent.ModifierFlags) {
+        self.key = key.lowercased()
+        self.modifiers = modifiers.intersection([.command, .shift, .option, .control])
+    }
 
     init?(_ text: String) {
         let parts = text.lowercased().split(separator: "+").map(String.init)
@@ -84,10 +97,40 @@ struct Chord {
 @MainActor
 enum Commands {
     /// keys.json: {"tab.new": "cmd+t", "tab.mute": ""}. Empty string unbinds.
-    static var overrides: [String: String] = [:]
+    static var overrides: [String: String] = [:] { didSet { rebuildClaimedOverrides() } }
+    /// Parsed chords explicitly assigned via `keys.json` to menu-registered commands.
+    fileprivate static var claimedOverrideChords: [(id: String, chord: Chord)] = []
+    /// Last non-zero radius seen, so toggling a custom radius to sharp and back preserves it in this session.
+    private static var lastRoundedRadius: Double = 8
+
+    static func noteRadius(_ radius: Double) {
+        if radius > 0 { lastRoundedRadius = radius }
+    }
 
     static func loadOverrides(_ paths: Paths) {
         overrides = (try? JSONFile.read([String: String].self, from: paths.keysFile)) ?? [:]
+    }
+
+    private static func rebuildClaimedOverrides() {
+        let menuIDs = Set(all.filter { $0.menu != .none }.map(\.id))
+        claimedOverrideChords = overrides.compactMap { id, raw in
+            guard menuIDs.contains(id), let chord = Chord(raw) else { return nil }
+            return (id, chord)
+        }
+    }
+
+    /// True when an explicit `keys.json` override on a menu command matches `event`.
+    static func isClaimedByOverride(_ event: NSEvent) -> Bool {
+        claimedOverrideChords.contains { $0.chord.matches(event) }
+    }
+
+    /// Shortcut labels for sidebar toggle (primary and fallback, deduplicated).
+    static var sidebarShortcutLabel: String {
+        var labels: [String] = []
+        for id in ["view.sidebar", "view.sidebarAlt"] {
+            if let label = chord(id)?.label, !label.isEmpty, !labels.contains(label) { labels.append(label) }
+        }
+        return labels.joined(separator: " / ")
     }
 
     static func command(_ id: String) -> Command? { all.first { $0.id == id } }
@@ -126,7 +169,24 @@ enum Commands {
             Command("find.prev", "Find Previous", .edit, "cmd+shift+g") { $0?.findNext(backwards: true) },
             Command("nav.copyURL", "Copy Clean URL", .edit, "cmd+shift+c") { $0?.copyCleanURL() },
 
-            Command("view.sidebar", "Toggle Sidebar", .view, "cmd+shift+l") { $0?.toggleSidebar() },
+            Command("view.sidebar", "Toggle Sidebar", .view, "cmd+s") { $0?.toggleSidebar() },
+            Command("view.sidebarAlt", "Toggle Sidebar", .view, "cmd+shift+l") { $0?.toggleSidebar() },
+            Command("view.corners", "Toggle Rounded Corners", .view, needsWindow: false) { w in
+                let current = Browser.shared.theme.radius
+                let next: Double
+                if current > 0 {
+                    lastRoundedRadius = current
+                    next = 0
+                } else {
+                    next = lastRoundedRadius > 0 ? lastRoundedRadius : 8
+                }
+                do {
+                    try Browser.shared.setTheme(path: "radius", value: next)
+                    w?.toast(next > 0 ? "rounded corners" : "sharp corners", color: { $0.secondary })
+                } catch {
+                    w?.toast((error as? PageCommands.Failure)?.message ?? error.localizedDescription, color: { $0.warn })
+                }
+            },
             Command("view.focus", "Focus Mode", .view, "cmd+shift+\\") { $0?.toggleFocusMode() },
             Command("passwords.fill", "Fill Login", .edit, "cmd+\\") { w in if let tab = w?.active { Passwords.shared.fillFocused(in: tab) } },
             Command("passwords.login", "Log In to Bitwarden…", .edit) { w in
@@ -147,7 +207,7 @@ enum Commands {
             Command("site.dark", "Cycle Dark Mode for Site", .view, "cmd+shift+d") { w in
                 w?.changeSite { p, o in o.dark = p.dark == .auto ? .force : p.dark == .force ? .off : .auto }
             },
-            Command("site.square", "Toggle Square Corners for Site", .view, "cmd+shift+u") { w in
+            Command("site.square", "Toggle Square Website Corners for Site", .view, "cmd+shift+u") { w in
                 w?.changeSite { p, o in o.square = !p.square }
             },
             Command("site.blocker", "Toggle Blocker for Site", .view) { w in w?.changeSite { p, o in o.blocker = !p.blocker } },
@@ -253,7 +313,7 @@ enum Commands {
             }
         }
         onOff("js", "JavaScript") { on, o in o.javascript = on }
-        onOff("square", "Square corners") { on, o in o.square = on }
+        onOff("square", "Square website corners") { on, o in o.square = on }
         onOff("blocker", "Blocker") { on, o in o.blocker = on }
         onOff("fonts", "Remote fonts") { on, o in o.blockRemoteFonts = !on }
         if !verb.isEmpty, "dark".hasPrefix(verb) || verb == "dark" {
@@ -287,7 +347,8 @@ enum Commands {
         }
         if "space".hasPrefix(verb), !verb.isEmpty {
             for (i, ws) in Browser.shared.workspaces.workspaces.enumerated() where arg.isEmpty || ws.name.lowercased().hasPrefix(arg) {
-                out.append(Entry(title: "Space \(ws.name)", detail: "", hint: i < 9 ? "⌃\(i + 1)" : "") { w in
+                let hint = i < 9 ? (chord("ws.\(i + 1)")?.label ?? "") : ""
+                out.append(Entry(title: "Space \(ws.name)", detail: "", hint: hint) { w in
                     w?.switchWorkspace(index: i)
                 })
             }
@@ -337,48 +398,51 @@ enum Commands {
             for c in all where c.menu == menu { m.addItem(item(c)) }
         }
 
+        func systemItem(_ title: String, action: Selector, key: String, modifiers: NSEvent.ModifierFlags = [.command]) -> NSMenuItem {
+            let claimed = !key.isEmpty && claimedOverrideChords.contains { $0.chord == Chord(key: key, modifiers: modifiers) }
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: claimed ? "" : key)
+            if !claimed, !key.isEmpty { item.keyEquivalentModifierMask = modifiers }
+            return item
+        }
+
         let app = submenu("angl")
         add(.app, to: app)
         app.addItem(.separator())
-        app.addItem(withTitle: "Hide angl", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-        let others = app.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
-        others.keyEquivalentModifierMask = [.command, .option]
-        app.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        app.addItem(systemItem("Hide angl", action: #selector(NSApplication.hide(_:)), key: "h"))
+        app.addItem(systemItem("Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), key: "h", modifiers: [.command, .option]))
+        app.addItem(systemItem("Show All", action: #selector(NSApplication.unhideAllApplications(_:)), key: ""))
         app.addItem(.separator())
-        app.addItem(withTitle: "Quit angl", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        app.addItem(systemItem("Quit angl", action: #selector(NSApplication.terminate(_:)), key: "q"))
 
         let file = submenu("File")
         add(.file, to: file)
 
         let edit = submenu("Edit")
-        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
-        let redo = edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
-        redo.keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(systemItem("Undo", action: Selector(("undo:")), key: "z"))
+        edit.addItem(systemItem("Redo", action: Selector(("redo:")), key: "z", modifiers: [.command, .shift]))
         edit.addItem(.separator())
-        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        let pasteMatch = edit.addItem(withTitle: "Paste and Match Style", action: #selector(NSTextView.pasteAsPlainText(_:)), keyEquivalent: "v")
-        pasteMatch.keyEquivalentModifierMask = [.command, .option, .shift]
-        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        edit.addItem(systemItem("Cut", action: #selector(NSText.cut(_:)), key: "x"))
+        edit.addItem(systemItem("Copy", action: #selector(NSText.copy(_:)), key: "c"))
+        edit.addItem(systemItem("Paste", action: #selector(NSText.paste(_:)), key: "v"))
+        edit.addItem(systemItem("Paste and Match Style", action: #selector(NSTextView.pasteAsPlainText(_:)), key: "v", modifiers: [.command, .option, .shift]))
+        edit.addItem(systemItem("Select All", action: #selector(NSText.selectAll(_:)), key: "a"))
         edit.addItem(.separator())
         add(.edit, to: edit)
 
         let view = submenu("View")
         add(.view, to: view)
         view.addItem(.separator())
-        let full = view.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
-        full.keyEquivalentModifierMask = [.command, .control]
+        view.addItem(systemItem("Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), key: "f", modifiers: [.command, .control]))
 
         add(.history, to: submenu("History"))
         add(.tabs, to: submenu("Tabs"))
         add(.workspaces, to: submenu("Spaces"))
 
         let window = submenu("Window")
-        window.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
-        window.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        window.addItem(systemItem("Minimize", action: #selector(NSWindow.performMiniaturize(_:)), key: "m"))
+        window.addItem(systemItem("Zoom", action: #selector(NSWindow.performZoom(_:)), key: ""))
         window.addItem(.separator())
-        window.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+        window.addItem(systemItem("Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), key: ""))
         NSApp.windowsMenu = window
         return main
     }

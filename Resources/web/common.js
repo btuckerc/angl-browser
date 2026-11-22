@@ -20,8 +20,9 @@
   const clone = (value) => JSON.parse(JSON.stringify(value));
   let settings = clone(defaults);
   const themeDefaults = {
+    radius: 8,
     color: { accent: '#55c3e8' },
-    window: { address: 'palette', newTab: 'field', caret: 'block', outline: 'none', outlineColor: 'accent', outlineCustomColor: '#55c3e8', outlineWidth: 0.5, outlineOpacity: 0.55, outlineInactiveOpacity: 0.15 },
+    window: { address: 'palette', newTab: 'field', caret: 'block', glass: true, outline: 'none', outlineColor: 'accent', outlineCustomColor: '#55c3e8', outlineWidth: 0.5, outlineOpacity: 0.55, outlineInactiveOpacity: 0.15 },
     sidebar: { mode: 'pinned', spaces: 'top', peekWidth: 10, peekDelayMs: 120, hideDelayMs: 400 }
   };
   const theme = clone(themeDefaults);
@@ -32,7 +33,7 @@
   };
   let mockAccount = { state: 'locked', email: 'you@example.com', server: 'bitwarden.com' };
   const mock = {
-    'settings.get': () => ({ settings, defaults, capabilities: { noJIT: true }, files: { settings: '~/config/angl/settings.json', theme: '~/config/angl/theme.json', keys: '~/config/angl/keys.json', css: '~/config/angl/css' } }),
+    'settings.get': () => ({ settings, defaults, capabilities: { noJIT: true, liquidGlass: true }, files: { settings: '~/config/angl/settings.json', theme: '~/config/angl/theme.json', keys: '~/config/angl/keys.json', css: '~/config/angl/css' } }),
     'settings.set': ({ path, value }) => {
       const parts = path.split('.');
       let target = settings;
@@ -64,8 +65,21 @@
     'theme.get': () => ({ theme, defaults: themeDefaults }),
     'passwords.login': () => { mockAccount = { state: 'unlocked', email: 'you@example.com', server: settings.passwords.server }; return mockAccount; },
     'passwords.logout': () => { mockAccount = { state: 'loggedOut', email: null, server: settings.passwords.server }; return mockAccount; },
-    'theme.set': ({ path, value }) => { const [group, key] = path.split('.'); theme[group][key] = value; return { theme }; },
-    'theme.reset': ({ path }) => { const [group, key] = path.split('.'); theme[group][key] = themeDefaults[group][key]; return { theme }; },
+    'theme.set': ({ path, value }) => {
+      const parts = path.split('.');
+      let target = theme;
+      parts.slice(0, -1).forEach((part) => { target = target[part]; });
+      target[parts.at(-1)] = value;
+      return { theme };
+    },
+    'theme.reset': ({ path }) => {
+      const parts = path.split('.');
+      let target = theme;
+      let source = themeDefaults;
+      parts.slice(0, -1).forEach((part) => { target = target[part]; source = source[part]; });
+      target[parts.at(-1)] = clone(source[parts.at(-1)]);
+      return { theme };
+    },
     'snapshots.list': () => ({ items: [{ id: 's1', date: new Date().toISOString(), auto: true, windows: 1, workspaces: 1, tabs: 3 }] }),
     'containers.clearData': () => ({}),
     'history.query': ({ text = '', offset = 0, sort }) => {

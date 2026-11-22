@@ -4,12 +4,11 @@ import WebKit
 
 // MARK: - New-tab surface
 
-/// A blank tab is not a web view. In palette mode it holds the address field, docked, with the wordmark
-/// as its prompt and the wordmark's ▮ as its caret; otherwise (or with `window.newTab: mark`) just the
-/// wordmark. Until the first navigation ever, a hint sits underneath.
+/// A blank tab is not a web view. In palette mode it holds the address field, docked and centred;
+/// otherwise (or with `window.newTab: mark`) a blank canvas. Until the first navigation ever, a
+/// hint sits underneath.
 final class BlankView: FlatView {
     private unowned let owner: BrowserWindowController
-    private let mark = NSTextField(labelWithString: "angl")
     private let hint = NSTextField(labelWithString: "⌘L go · ⌘K commands · ⌘, settings")
     private let dock: PaletteView
 
@@ -17,9 +16,7 @@ final class BlankView: FlatView {
         self.owner = owner
         dock = PaletteView(owner: owner, docked: true)
         super.init(frame: .zero)
-        mark.alignment = .center
         hint.alignment = .center
-        addSubview(mark)
         addSubview(hint)
         addSubview(dock)
         dock.onResize = { [weak self] in self?.needsLayout = true }
@@ -47,13 +44,6 @@ final class BlankView: FlatView {
 
     func applyStyle(_ s: Style) {
         fill = s.base
-        // Docked, `angl` is right-aligned against the field: a label sized to its own text drops the last glyph.
-        let para = NSMutableParagraphStyle()
-        para.alignment = docked ? .right : .center // attributed values ignore the field's own alignment
-        let wordmark = NSMutableAttributedString(string: "angl", attributes: [.font: s.monoLarge, .foregroundColor: s.muted, .paragraphStyle: para])
-        // Docked, the ▮ is the field's caret instead.
-        if !docked { wordmark.append(NSAttributedString(string: " ▮", attributes: [.font: s.monoLarge, .foregroundColor: s.accent, .paragraphStyle: para])) }
-        mark.attributedStringValue = wordmark
         hint.font = s.monoSmall
         hint.textColor = s.muted
         dock.isHidden = !docked
@@ -64,28 +54,17 @@ final class BlankView: FlatView {
 
     override func layout() {
         super.layout()
-        hint.isHidden = UserDefaults.standard.bool(forKey: "angl.hintSeen")
+        hint.isHidden = !docked || UserDefaults.standard.bool(forKey: "angl.hintSeen")
+        guard docked else { return }
         let hh = ceil(hint.intrinsicContentSize.height)
-        guard docked else {
-            let mh = ceil(mark.intrinsicContentSize.height)
-            mark.frame = NSRect(x: 0, y: bounds.midY - mh, width: bounds.width, height: mh)
-            hint.frame = NSRect(x: 0, y: mark.frame.maxY + 8, width: bounds.width, height: hh)
-            return
-        }
-        // `angl` then the field, as one centred row lifted above the middle (dead centre reads low).
-        // The row stays put while suggestions grow under it, so it is placed for the longest list.
+        // The field sits lifted above the middle (dead centre reads low) and stays put while
+        // suggestions grow downward under it, so it is placed for the longest list.
         let band = PaletteView.fieldBand
-        let markW = ceil(("angl" as NSString).size(withAttributes: [.font: owner.style.monoLarge]).width)
-        let gap = ceil(("  " as NSString).size(withAttributes: [.font: owner.style.monoLarge]).width)
-        let width = max(120, min(640, bounds.width - 64 - markW - gap))
+        let width = max(120, min(640, bounds.width - 64))
         let longest = band + SuggestionList.height(for: SuggestionList.visible)
         let top = max(8, min(bounds.midY - 60 - band / 2, bounds.height - longest - 8)).rounded()
-        let x = ((bounds.width - markW - gap - width) / 2).rounded()
-        dock.frame = NSRect(x: x + markW + gap, y: top, width: width, height: dock.height)
-        // Same font and frame as the field's text, so `angl` shares its baseline.
-        let font = owner.style.monoLarge
-        let fh = ceil(font.ascender - font.descender + font.leading) + 2
-        mark.frame = NSRect(x: 0, y: top + 1 + ((band - fh) / 2).rounded(), width: max(0, dock.frame.minX - gap + 3), height: fh)
+        let x = ((bounds.width - width) / 2).rounded()
+        dock.frame = NSRect(x: x, y: top, width: width, height: dock.height)
         hint.frame = NSRect(x: 0, y: top + band + 2 + 8, width: bounds.width, height: hh)
     }
 
@@ -121,7 +100,8 @@ final class StatusOverlay: FlatView {
         style = s
         fill = s.base
         borderColor = s.border
-        edges = [.top, .right]
+        cornerRadius = s.smallRadius
+        edges = s.radius > 0 ? .all : [.top, .right]
         text.font = s.monoSmall
         render()
     }
@@ -172,10 +152,11 @@ final class StatusOverlay: FlatView {
         text.stringValue = msg
         text.textColor = color
         // cellSize includes the label's text padding; intrinsicContentSize doesn't, which clipped short toasts.
-        let w = min(ceil(text.cell?.cellSize.width ?? text.intrinsicContentSize.width) + 16, maxWidth)
-        frame = NSRect(x: area.minX, y: area.maxY - 20, width: w, height: 20)
+        let inset: CGFloat = s.radius > 0 ? 6 : 0
+        let w = min(ceil(text.cell?.cellSize.width ?? text.intrinsicContentSize.width) + 16, max(0, maxWidth - inset * 2))
+        frame = NSRect(x: area.minX + inset, y: area.maxY - 20 - inset, width: w, height: 20)
         let th = ceil(text.intrinsicContentSize.height)
-        text.frame = NSRect(x: 8, y: (20 - th) / 2 + 1, width: w - 16, height: th)
+        text.frame = NSRect(x: 8, y: (20 - th) / 2 + (s.radius > 0 ? 0 : 1), width: max(0, w - 16), height: th)
     }
 }
 
@@ -205,6 +186,12 @@ final class PermissionBar: FlatView {
         edges = .bottom
         text.font = s.ui
         text.textColor = s.primary
+        for (i, b) in buttons.enumerated() {
+            b.font = s.ui
+            b.tint = i == buttons.count - 1 ? s.secondary : s.accent
+            b.hoverFill = s.selected
+            b.cornerRadius = s.smallRadius
+        }
     }
 
     /// Returns the index of the button pressed.
@@ -233,6 +220,7 @@ final class PermissionBar: FlatView {
             b.font = s.ui
             b.tint = i == titles.count - 1 ? s.secondary : s.accent
             b.hoverFill = s.selected
+            b.cornerRadius = s.smallRadius
             b.action = { [weak self] in self?.answer(i) }
             addSubview(b)
             return b
@@ -266,6 +254,7 @@ final class PermissionBar: FlatView {
 
 final class FindBar: FlatView, NSTextFieldDelegate {
     unowned let owner: BrowserWindowController
+    private let fieldBox = FlatView()
     private let field = NSTextField()
     private let result = NSTextField(labelWithString: "")
     private let prev = GlyphButton(size: 22)
@@ -279,11 +268,12 @@ final class FindBar: FlatView, NSTextFieldDelegate {
         super.init(frame: .zero)
         field.isBordered = false
         field.focusRingType = .none
-        field.drawsBackground = true
+        field.drawsBackground = false
         field.delegate = self
         field.placeholderString = "find in page"
         field.usesSingleLineMode = true
-        for v: NSView in [field, result, prev, next, caseButton, close] { addSubview(v) }
+        fieldBox.addSubview(field)
+        for v: NSView in [fieldBox, result, prev, next, caseButton, close] { addSubview(v) }
         prev.toolTip = "Previous match (⇧⌘G)"
         next.toolTip = "Next match (⌘G)"
         close.toolTip = "Close find (Esc)"
@@ -308,9 +298,12 @@ final class FindBar: FlatView, NSTextFieldDelegate {
         fill = s.raised
         borderColor = s.border
         edges = .bottom
+        fieldBox.fill = s.base
+        fieldBox.borderColor = s.radius > 0 ? s.border : nil
+        fieldBox.edges = s.radius > 0 ? .all : []
+        fieldBox.cornerRadius = s.smallRadius
         field.font = s.mono
         field.textColor = s.primary
-        field.backgroundColor = s.base
         result.font = s.monoSmall
         result.textColor = s.danger
         prev.image = s.symbol("chevron.up")
@@ -319,15 +312,19 @@ final class FindBar: FlatView, NSTextFieldDelegate {
         caseButton.font = s.monoSmall
         caseButton.tint = caseSensitive ? s.accent : s.secondary
         for b in [prev, next, close] { b.tint = s.secondary }
-        for b in [prev, next, close, caseButton] { b.hoverFill = s.selected }
+        for b in [prev, next, close, caseButton] { b.hoverFill = s.selected; b.cornerRadius = s.smallRadius }
+        needsLayout = true
     }
 
     override func layout() {
         super.layout()
         let h = bounds.height
+        let pad: CGFloat = owner.style.radius > 0 ? 6 : 0
         let fh = ceil(field.intrinsicContentSize.height)
-        field.frame = NSRect(x: 8, y: (h - fh) / 2, width: min(320, bounds.width / 2), height: fh)
-        var x = field.frame.maxX + 6
+        let boxH = owner.style.radius > 0 ? max(22, fh) : fh
+        fieldBox.frame = NSRect(x: 8, y: (h - boxH) / 2, width: min(320, bounds.width / 2), height: boxH)
+        field.frame = NSRect(x: pad, y: (boxH - fh) / 2, width: max(0, fieldBox.bounds.width - pad * 2), height: fh)
+        var x = fieldBox.frame.maxX + 6
         for b in [prev, next, caseButton] {
             b.frame.origin = NSPoint(x: x, y: (h - 22) / 2)
             x += b.frame.width + 2
@@ -378,6 +375,7 @@ final class FindBar: FlatView, NSTextFieldDelegate {
 final class SitePanel: NSPanel, NSWindowDelegate {
     unowned let owner: BrowserWindowController
     let siteTab: Tab
+    var onClose: (() -> Void)?
     private let body = FlatView()
     private var rows: [NSView] = []
     private let width: CGFloat = 280
@@ -400,21 +398,36 @@ final class SitePanel: NSPanel, NSWindowDelegate {
 
     override func cancelOperation(_ sender: Any?) { close() }
 
+    private var bodyHeight: CGFloat = 0
+
     func show(below anchor: NSRect) {
         rebuild()
-        let h = body.frame.height
+        let h = bodyHeight
         // Right-aligned under the anchor, but kept inside the window (the palette-mode gear sits near
         // the sidebar's right edge, so a right-aligned panel would hang off the window's left side).
         let bounds = owner.window?.frame ?? .infinite
         let x = min(max(anchor.maxX - width, bounds.minX + 4), bounds.maxX - width - 4)
         setFrame(NSRect(x: x, y: anchor.minY - h - 4, width: width, height: h), display: true)
+        applyPanelSurface(self, body: body, style: style)
         owner.window?.addChildWindow(self, ordered: .above)
         makeKeyAndOrderFront(nil)
+        invalidateShadow()
     }
 
     override func close() {
         parent?.removeChildWindow(self)
         super.close()
+        if #available(macOS 26.0, *), let glass = contentView as? NSGlassEffectView {
+            glass.contentView = nil
+            contentView = body
+        }
+        onClose?()
+    }
+
+    func applyStyle() {
+        rebuild()
+        setFrame(NSRect(x: frame.minX, y: frame.maxY - bodyHeight, width: width, height: bodyHeight), display: true)
+        applyPanelSurface(self, body: body, style: style)
     }
 
     private var url: URL? { siteTab.url }
@@ -424,9 +437,10 @@ final class SitePanel: NSPanel, NSWindowDelegate {
         rows.forEach { $0.removeFromSuperview() }
         rows = []
         let s = style
-        body.fill = s.raised
-        body.borderColor = s.border
-        body.edges = .all
+        body.cornerRadius = s.radius
+        body.fill = s.glass ? nil : s.raised
+        body.borderColor = s.glass ? nil : s.border
+        body.edges = s.glass ? [] : .all
         guard let url, let host = SiteStore.key(for: url) else { return }
         let b = Browser.shared!
         let p = b.policy(for: url)
@@ -444,7 +458,7 @@ final class SitePanel: NSPanel, NSWindowDelegate {
         addToggle("Block remote fonts", on: p.blockRemoteFonts, overridden: o?.blockRemoteFonts != nil) { o, p in
             o.blockRemoteFonts = !p.blockRemoteFonts
         }
-        addToggle("Square corners", on: p.square, overridden: o?.square != nil) { o, p in o.square = !p.square }
+        addToggle("Square website corners", on: p.square, overridden: o?.square != nil) { o, p in o.square = !p.square }
         addChoice("Dark", options: DarkMode.allCases.map(\.rawValue), selected: p.dark.rawValue) { [weak self] v in
             self?.change(reload: true) { o, _ in o.dark = DarkMode(rawValue: v) }
         }
@@ -503,7 +517,9 @@ final class SitePanel: NSPanel, NSWindowDelegate {
     private func change(reload: Bool, _ f: (inout SiteOverrides, SitePolicy) -> Void) {
         owner.changeSite(reload: reload) { p, o in f(&o, p) }
         rebuild()
-        if let anchor = Optional(frame) { setFrame(NSRect(x: anchor.minX, y: anchor.maxY - body.frame.height, width: width, height: body.frame.height), display: true) }
+        setFrame(NSRect(x: frame.minX, y: frame.maxY - bodyHeight, width: width, height: bodyHeight), display: true)
+        if let cv = contentView { body.frame = cv.bounds }
+        invalidateShadow()
     }
 
     // Row builders
@@ -597,6 +613,7 @@ final class SitePanel: NSPanel, NSWindowDelegate {
         b.font = style.ui
         b.tint = color ?? style.accent
         b.hoverFill = style.selected
+        b.cornerRadius = style.smallRadius
         b.action = action
         row.accessory = b
         rows.append(row)
@@ -613,7 +630,8 @@ final class SitePanel: NSPanel, NSWindowDelegate {
             y += h
             if h == 1 { y += 4 }
         }
-        body.frame = NSRect(x: 0, y: 0, width: width, height: y + 6)
+        bodyHeight = y + 6
+        body.frame = NSRect(x: 0, y: 0, width: width, height: bodyHeight)
     }
 }
 
@@ -681,9 +699,14 @@ final class ToggleSquare: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         let r = bounds.insetBy(dx: 1, dy: 1)
-        if on { style.accent.setFill(); r.fill() }
+        let cr = style.tinyRadius
+        if on {
+            style.accent.setFill()
+            if cr > 0 { NSBezierPath(roundedRect: r, xRadius: cr, yRadius: cr).fill() } else { r.fill() }
+        }
         (on ? style.accent : style.muted).setStroke()
-        let p = NSBezierPath(rect: r.insetBy(dx: 0.5, dy: 0.5))
+        let sr = max(0, cr - 0.5)
+        let p = sr > 0 ? NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: sr, yRadius: sr) : NSBezierPath(rect: r.insetBy(dx: 0.5, dy: 0.5))
         p.lineWidth = 1
         p.stroke()
     }
@@ -691,7 +714,7 @@ final class ToggleSquare: NSView {
     override func mouseDown(with event: NSEvent) { action?() }
 }
 
-/// Row of square text options; the selected one is filled.
+/// Row of text options; the selected one is filled.
 final class Segments: NSView {
     init(style s: Style, options: [String], selected: String?, pick: @escaping (String) -> Void) {
         super.init(frame: .zero)
@@ -703,11 +726,13 @@ final class Segments: NSView {
             b.font = s.monoSmall
             b.tint = o == selected ? s.base : s.secondary
             b.hoverFill = s.selected
+            b.cornerRadius = s.smallRadius
             b.action = { pick(o) }
             b.frame.origin.x = x
             if o == selected {
                 let bg = FlatView(frame: b.frame)
                 bg.fill = s.accent
+                bg.cornerRadius = s.smallRadius
                 addSubview(bg)
             }
             addSubview(b)
@@ -769,10 +794,12 @@ final class Dropdown: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        let cr = style.smallRadius
         (hovering ? style.selected : style.raised).setFill()
-        bounds.fill()
+        if cr > 0 { NSBezierPath(roundedRect: bounds, xRadius: cr, yRadius: cr).fill() } else { bounds.fill() }
         style.border.setStroke()
-        let p = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
+        let sr = max(0, cr - 0.5)
+        let p = sr > 0 ? NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: sr, yRadius: sr) : NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
         p.lineWidth = 1
         p.stroke()
         let attrs: [NSAttributedString.Key: Any] = [.font: style.monoSmall, .foregroundColor: selected == nil ? style.secondary : style.primary]

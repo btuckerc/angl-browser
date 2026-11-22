@@ -4,7 +4,7 @@ import Foundation
 /// The same tokens are exported as CSS custom properties to angl:// pages.
 public struct Theme: Codable, Equatable, Sendable {
     public var appearance: Appearance = .dark
-    public var radius: Double = 0
+    public var radius: Double = 8
     public var font = Fonts()
     /// The palette. In light appearance, `colorLight` is drawn instead: the built-in light palette
     /// with the user's appearance-neutral `color` keys and then their `colorLight` keys on top (see `layered(user:)`).
@@ -153,15 +153,17 @@ public struct Theme: Codable, Equatable, Sendable {
 
     public struct Window: Codable, Equatable, Sendable {
         public enum Address: String, Codable, Sendable { case palette, bar }
-        /// What an empty tab shows in palette mode: the address field docked in the page, or only the wordmark.
+        /// What an empty tab shows in palette mode: the address field docked in the page, or a blank canvas.
         public enum NewTab: String, Codable, Sendable { case field, mark }
-        /// The docked field's caret: the wordmark's block, or the system's.
+        /// The docked field's caret: the block caret, or the system's.
         public enum Caret: String, Codable, Sendable { case block, native }
         public enum Outline: String, Codable, Sendable { case none, seam, content }
         public enum OutlineColor: String, Codable, Sendable { case accent, border, container, custom }
         public var address: Address = .palette
         public var newTab: NewTab = .field
         public var caret: Caret = .block
+        /// Use macOS 26+ Liquid Glass on floating panels (falls back to solid on older macOS or with Reduce Transparency / Increase Contrast).
+        public var glass = true
         /// Decoration placement; unknown legacy values deliberately decode to none.
         public var outline: Outline = .none
         public var outlineColor: OutlineColor = .accent
@@ -170,13 +172,14 @@ public struct Theme: Codable, Equatable, Sendable {
         public var outlineOpacity: Double = 0.55
         public var outlineInactiveOpacity: Double = 0.15
 
-        private enum CodingKeys: String, CodingKey { case address, newTab, caret, outline, outlineColor, outlineCustomColor, outlineWidth, outlineOpacity, outlineInactiveOpacity }
+        private enum CodingKeys: String, CodingKey { case address, newTab, caret, glass, outline, outlineColor, outlineCustomColor, outlineWidth, outlineOpacity, outlineInactiveOpacity }
         public init() {}
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             address = try c.decodeIfPresent(Address.self, forKey: .address) ?? .palette
             newTab = (try? c.decode(NewTab.self, forKey: .newTab)) ?? .field
             caret = (try? c.decode(Caret.self, forKey: .caret)) ?? .block
+            glass = try c.decodeIfPresent(Bool.self, forKey: .glass) ?? true
             outline = (try? c.decode(Outline.self, forKey: .outline)) ?? .none
             outlineColor = try c.decodeIfPresent(OutlineColor.self, forKey: .outlineColor) ?? .accent
             outlineCustomColor = try c.decodeIfPresent(String.self, forKey: .outlineCustomColor) ?? "#55c3e8"
@@ -214,10 +217,16 @@ public struct Theme: Codable, Equatable, Sendable {
     /// A partial user theme layered over the defaults. `color`'s `sharedColorKeys` are layered under
     /// the user's `colorLight`, which then goes over the light palette.
     public static func layered(user: Any) throws -> Theme {
-        guard var u = user as? [String: Any], let color = u["color"] as? [String: Any] else { return try JSONFile.layered(Theme(), user: user) }
-        let shared = color.filter { sharedColorKeys.contains($0.key) }
-        u["colorLight"] = u["colorLight"].map { JSONFile.merge(shared, $0) } ?? shared
-        return try JSONFile.layered(Theme(), user: u)
+        var t: Theme
+        if var u = user as? [String: Any], let color = u["color"] as? [String: Any] {
+            let shared = color.filter { sharedColorKeys.contains($0.key) }
+            u["colorLight"] = u["colorLight"].map { JSONFile.merge(shared, $0) } ?? shared
+            t = try JSONFile.layered(Theme(), user: u)
+        } else {
+            t = try JSONFile.layered(Theme(), user: user)
+        }
+        t.radius = max(0, t.radius)
+        return t
     }
 
     public static func load(from url: URL) throws -> Theme {
@@ -233,7 +242,7 @@ public struct Theme: Codable, Equatable, Sendable {
             ("accent", color.accent),
             ("ok", color.ok), ("warn", color.warn), ("danger", color.danger), ("danger-strong", color.dangerStrong),
             ("border", color.resolvedBorder),
-            ("radius", "\(radius)px"),
+            ("radius", "\(max(0, radius))px"),
             ("font-ui", font.ui == "system" ? "-apple-system, system-ui, sans-serif" : "\"\(font.ui)\", -apple-system, sans-serif"),
             ("font-mono", "\"\(font.mono)\", \"SF Mono\", ui-monospace, monospace"),
             ("font-size", "\(font.size)px"),

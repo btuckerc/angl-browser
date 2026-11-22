@@ -145,6 +145,7 @@ code,
 .rail a {
   display: block;
   padding: 6px 8px;
+  border-radius: min(var(--radius, 0px), 4px);
   color: var(--fg-secondary, #a3a29f);
   text-decoration: none;
 }
@@ -274,6 +275,7 @@ td input {
 
 .panel {
   border: var(--hair);
+  border-radius: var(--radius, 0);
   /* Plus each row's own 3px: the same 7px above the first row and below the last. */
   padding: 4px 10px;
   margin-bottom: 12px;

@@ -48,7 +48,6 @@ final class NavBar: FlatView, NSTextFieldDelegate {
         }
         newTabButton.action = { [weak owner] in owner?.newTab() }
         siteButton.action = { [weak owner] in owner?.showSitePanel() }
-        sidebarButton.toolTip = "Toggle sidebar (⇧⌘L)"
         backButton.toolTip = "Back (⌘[)"
         forwardButton.toolTip = "Forward (⌘])"
         newTabButton.toolTip = "New tab (⌘T)"
@@ -64,6 +63,7 @@ final class NavBar: FlatView, NSTextFieldDelegate {
         field.delegate = self
         field.placeholderString = "search or address (> for commands)"
         field.onFocus = { [weak self] in if self?.editing == false { self?.beginEditing(prefill: nil) } }
+        suggestions.anchor = { [weak self] in self?.boxRectOnScreen ?? .zero }
         suggestions.onPick = { [weak self] s, d in self?.run(s, d) }
         applyStyle()
     }
@@ -78,7 +78,10 @@ final class NavBar: FlatView, NSTextFieldDelegate {
         for b in [sidebarButton, backButton, forwardButton, reloadButton, newTabButton, siteButton] {
             b.tint = s.secondary
             b.hoverFill = s.raised
+            b.cornerRadius = s.smallRadius
         }
+        let sidebarKey = Commands.sidebarShortcutLabel
+        sidebarButton.toolTip = "Toggle sidebar" + (sidebarKey.isEmpty ? "" : " (\(sidebarKey))")
         siteButton.image = s.symbol("gearshape", size: s.glyph - 3)
         sidebarButton.image = s.symbol("sidebar.left")
         backButton.image = s.symbol("chevron.left")
@@ -87,6 +90,8 @@ final class NavBar: FlatView, NSTextFieldDelegate {
         box.fill = s.raised
         box.borderColor = s.border
         box.edges = .all
+        box.cornerRadius = s.smallRadius
+        square.cornerRadius = s.tinyRadius
         field.font = s.mono
         field.textColor = s.primary
         progressBar.fill = s.accent
@@ -453,9 +458,25 @@ enum OmniboxEditing {
 @MainActor
 final class SuggestionsPanel {
     var onPick: ((Suggestion, NavBar.Disposition) -> Void)?
-    var style: Style? { didSet { list.style = style; list.needsDisplay = true } }
+    var anchor: (() -> NSRect)?
+    var style: Style? {
+        didSet {
+            list.style = style
+            list.needsDisplay = true
+            if let p = panel, let s = style {
+                applyPanelSurface(p, body: list, style: s)
+                if isVisible, let rect = anchor?(), !rect.isEmpty {
+                    let h = SuggestionList.height(for: items.count)
+                    let gap: CGFloat = s.radius > 0 || s.glass ? 4 : -1
+                    let nextFrame = NSRect(x: rect.minX, y: rect.minY - h - gap, width: rect.width, height: h)
+                    if p.frame != nextFrame { p.setFrame(nextFrame, display: true); p.invalidateShadow() }
+                }
+            }
+        }
+    }
     private var panel: NSPanel?
     private let list = SuggestionList()
+
     var items: [Suggestion] { list.items }
 
     var isVisible: Bool { panel?.isVisible ?? false }
@@ -464,9 +485,13 @@ final class SuggestionsPanel {
     var keyed: Suggestion? { isVisible && list.keyed ? list.current : nil }
 
     func show(_ items: [Suggestion], below rect: NSRect, parent: NSWindow?) {
+        let wasVisible = isVisible
         let p = panel ?? makePanel()
         let h = SuggestionList.height(for: items.count)
-        p.setFrame(NSRect(x: rect.minX, y: rect.minY - h + 1, width: rect.width, height: h), display: false)
+        let gap: CGFloat = (style?.radius ?? 0) > 0 || (style?.glass ?? false) ? 4 : -1
+        let nextFrame = NSRect(x: rect.minX, y: rect.minY - h - gap, width: rect.width, height: h)
+        let resized = p.frame != nextFrame
+        if resized { p.setFrame(nextFrame, display: false) }
         list.style = style
         list.items = items
         list.onPick = { [weak self] i in
@@ -474,9 +499,10 @@ final class SuggestionsPanel {
             let flags = NSApp.currentEvent?.modifierFlags ?? []
             self.onPick?(self.items[i], flags.contains(.command) ? .childTab : flags.contains(.shift) ? .newWindow : .current)
         }
-        list.frame = p.contentView!.bounds
+        if resized { list.frame = p.contentView!.bounds }
         if p.parent == nil { parent?.addChildWindow(p, ordered: .above) }
         p.orderFront(nil)
+        if !wasVisible || resized { p.invalidateShadow() }
     }
 
     func move(_ delta: Int) {
@@ -493,11 +519,11 @@ final class SuggestionsPanel {
     private func makePanel() -> NSPanel {
         let p = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
         p.hasShadow = true
-        p.isOpaque = true
         p.level = .popUpMenu
         p.hidesOnDeactivate = true
         list.autoresizingMask = [.width, .height]
         p.contentView = list
+        if let s = style { applyPanelSurface(p, body: list, style: s) }
         panel = p
         return p
     }
@@ -509,6 +535,8 @@ final class SuggestionsPanel {
 final class SuggestionList: NSView {
     static let rowHeight: CGFloat = 28
     static let visible = 8
+    /// True when hosted inside `PaletteView`, which owns the outer surface and border.
+    var embedded = false
     var style: Style?
     var items: [Suggestion] = [] {
         didSet {
@@ -637,13 +665,20 @@ final class SuggestionList: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let s = style else { return }
-        s.raised.setFill(); bounds.fill()
+        let rOuter = min(s.radius, min(bounds.width, bounds.height) / 2)
+        if !embedded, !s.glass {
+            s.raised.setFill()
+            if rOuter > 0 { NSBezierPath(roundedRect: bounds, xRadius: rOuter, yRadius: rOuter).fill() } else { bounds.fill() }
+        }
+        if embedded {
+            (s.glass ? s.border.withAlphaComponent(0.5) : s.border).setFill()
+            NSRect(x: s.radius > 0 ? 8 : 0, y: 0, width: max(0, bounds.width - (s.radius > 0 ? 16 : 0)), height: 1).fill()
+        }
         for i in items.indices.clamped(to: top..<(top + Self.visible)) {
             let item = items[i]
             let r = rowRect(i), y = r.minY
             if i == selected {
-                s.selected.setFill(); r.fill()
-                s.accent.setFill(); NSRect(x: 1, y: y, width: 2, height: r.height).fill()
+                fillRowPill(r, fill: s.selected, bar: s.accent, radius: s.smallRadius)
             }
             if let img = s.symbol(item.glyph, tint: s.secondary) {
                 img.draw(in: NSRect(x: 10, y: y + (r.height - img.size.height) / 2, width: img.size.width, height: img.size.height))
@@ -678,9 +713,14 @@ final class SuggestionList: NSView {
             s.border.setFill()
             NSRect(x: bounds.width - 4, y: 1 + track * CGFloat(top) / n, width: 2, height: track * CGFloat(Self.visible) / n).fill()
         }
-        s.border.setStroke()
-        let path = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
-        path.lineWidth = 1
-        path.stroke()
+        if !embedded, !s.glass {
+            s.border.setStroke()
+            let sr = max(0, rOuter - 0.5)
+            let path = sr > 0
+                ? NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: sr, yRadius: sr)
+                : NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
+            path.lineWidth = 1
+            path.stroke()
+        }
     }
 }

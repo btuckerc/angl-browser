@@ -121,12 +121,21 @@ function layout() {
       group('Color', [
         T('color.accent', 'Accent', null, { kind: 'accent', keywords: 'accent interface white blue yellow pink colour tint swatches custom' }),
       ]),
+      group('Shape & material', [
+        T('radius', 'Browser corners', 'Sharp or rounded browser chrome. Website corners are under Pages & media.', {
+          kind: 'corners', options: [[0, 'Sharp'], [8, 'Rounded']], keywords: 'corners sharp rounded radius chrome ui shape border',
+        }),
+        T('window.glass', 'Liquid Glass panels', 'Translucent floating panels on macOS 26+. Falls back to solid with Reduce Transparency or Increase Contrast.', {
+          keywords: 'liquid glass translucent blur floating palette material macos tahoe',
+          warn: (v) => v && !state.capabilities.liquidGlass ? 'Liquid Glass needs macOS 26; panels stay solid.' : null,
+        }),
+      ]),
       group('Address bar', [
         T('window.address', 'Style', null, {
           options: [['palette', 'Floating (⌘L)'], ['bar', 'Toolbar']], keywords: 'address control palette bar omnibox url location cmd l cmd t floating always visible',
         }),
         T('window.newTab', 'New tab shows', null, {
-          options: [['field', 'Address field'], ['mark', 'Wordmark']], keywords: 'empty new tab blank field mark wordmark', dependsOn: [floating],
+          options: [['field', 'Address field'], ['mark', 'Blank']], keywords: 'empty new tab blank field mark', dependsOn: [floating],
         }),
         T('window.caret', 'Caret', null, {
           options: [['block', 'Block'], ['native', 'System']], keywords: 'empty tab caret cursor insertion native block accent',
@@ -175,7 +184,9 @@ function layout() {
         S('content.javascript', 'JavaScript', null, {
           keywords: 'website scripts execution compatibility', warn: (v) => v ? null : 'Most sites break without it.',
         }),
-        S('content.square', 'Square corners', null, { keywords: 'square page corners radius rounding sharp rectangles' }),
+        S('content.square', 'Square website corners', 'Removes rounded corners on web pages. Browser corners are under Appearance.', {
+          keywords: 'square page website corners radius rounding sharp rectangles',
+        }),
         action('Per-site overrides', null, () => link('angl://sites', 'Open Sites ↗'), 'sites exceptions per site settings'),
       ], { desc: 'Sites can override these.' }),
       group('Media', [
@@ -388,6 +399,7 @@ const kindOf = (item, value) => item.kind ?? (item.options ? 'select' : typeof v
 function display(item, value) {
   const kind = kindOf(item, value);
   if (kind === 'switch') return value ? 'On' : 'Off';
+  if (kind === 'corners') return item.options.find(([v]) => Number(v) === Number(value))?.[1] ?? `Custom (${value} pt)`;
   if (item.options) return item.options.find(([v]) => v === value)?.[1] ?? String(value);
   if (kind === 'list') return listNames(value);
   if (kind === 'number' && item.unit) return `${value} ${item.unit}`;
@@ -424,7 +436,9 @@ function renderSetting(item, scope) {
     dormant: () => (item.dependsOn ?? []).find((d) => !d.is(valueOf(...d.key.split(/:(.*)/s).slice(0, 2)))),
     update(force) {
       const current = valueOf(item.ns, item.path);
-      if (force || !row.contains(document.activeElement) || kind === 'switch' || kind === 'accent') control.set(current);
+      const active = document.activeElement;
+      const keepDraft = Boolean(active && row.contains(active) && active.dataset?.dirty === '1');
+      if (force || !keepDraft) control.set(current);
       const modified = differs(item.ns, item.path);
       marker.hidden = !modified;
       row.classList.toggle('is-modified', modified);
@@ -480,6 +494,20 @@ function makeControl(item, kind, { id, labelID, describedBy }) {
       el('span', { class: 'switch-track', 'aria-hidden': 'true' }, el('span', { class: 'switch-thumb' })));
     return { element, set: (v) => { input.checked = Boolean(v); } };
   }
+  if (kind === 'corners') {
+    const select = el('select', aria, ...item.options.map(([value, text]) => el('option', { value: String(value) }, text)));
+    const custom = el('option', { hidden: true, disabled: true });
+    select.append(custom);
+    select.addEventListener('change', () => commit(Number(select.value), () => set(current())));
+    const set = (v) => {
+      const n = Number(v);
+      const match = item.options.some(([opt]) => Number(opt) === n);
+      custom.hidden = match;
+      if (!match) { custom.value = String(n); custom.textContent = `Custom (${n} pt)`; }
+      select.value = String(n);
+    };
+    return { element: select, set };
+  }
   if (kind === 'select' || kind === 'hardening') {
     const select = el('select', aria, ...item.options.map(([value, text]) => el('option', {
       value, disabled: kind === 'hardening' && value === 'noJIT' && !state.capabilities.noJIT,
@@ -489,7 +517,13 @@ function makeControl(item, kind, { id, labelID, describedBy }) {
   }
   if (kind === 'number') {
     const input = el('input', { type: 'number', inputmode: 'decimal', step: item.step ?? 'any', min: item.min, max: item.max, ...aria });
+    input.addEventListener('input', () => { input.dataset.dirty = '1'; });
+    input.addEventListener('blur', () => {
+      if (document.activeElement === input) return;
+      if (input.dataset.dirty === '1') { delete input.dataset.dirty; input.value = current(); }
+    });
     input.addEventListener('change', () => {
+      delete input.dataset.dirty;
       const raw = input.value.trim();
       const next = Number(raw);
       const bad = raw === '' || !Number.isFinite(next) || (item.min != null && next < item.min) || (item.max != null && next > item.max);
@@ -501,12 +535,20 @@ function makeControl(item, kind, { id, labelID, describedBy }) {
       commit(next, () => { input.value = current(); });
     });
     const element = item.unit ? el('span', { class: 'with-unit' }, input, el('span', { class: 'unit', 'aria-hidden': 'true' }, item.unit)) : input;
-    return { element, set: (v) => { input.value = v; } };
+    return { element, set: (v) => { delete input.dataset.dirty; input.value = v; } };
   }
   if (kind === 'list') {
     const input = el('input', { type: 'text', class: item.wide ? 'wide' : '', spellcheck: 'false', ...aria });
-    input.addEventListener('change', () => commit(input.value.split(/[\s,]+/).filter(Boolean), () => { input.value = current().join(', '); }));
-    return { element: input, set: (v) => { input.value = (v ?? []).join(', '); } };
+    input.addEventListener('input', () => { input.dataset.dirty = '1'; });
+    input.addEventListener('blur', () => {
+      if (document.activeElement === input) return;
+      if (input.dataset.dirty === '1') { delete input.dataset.dirty; input.value = (current() ?? []).join(', '); }
+    });
+    input.addEventListener('change', () => {
+      delete input.dataset.dirty;
+      commit(input.value.split(/[\s,]+/).filter(Boolean), () => { input.value = current().join(', '); });
+    });
+    return { element: input, set: (v) => { delete input.dataset.dirty; input.value = (v ?? []).join(', '); } };
   }
   if (kind === 'color') {
     const input = el('input', { type: 'color', ...aria });
@@ -515,8 +557,16 @@ function makeControl(item, kind, { id, labelID, describedBy }) {
   }
   if (kind === 'accent') return accentControl(item, commit, labelID);
   const input = el('input', { type: 'text', class: item.wide ? 'wide' : '', spellcheck: 'false', ...aria });
-  input.addEventListener('change', () => commit(input.value, () => { input.value = current(); }));
-  return { element: input, set: (v) => { input.value = v ?? ''; } };
+  input.addEventListener('input', () => { input.dataset.dirty = '1'; });
+  input.addEventListener('blur', () => {
+    if (document.activeElement === input) return;
+    if (input.dataset.dirty === '1') { delete input.dataset.dirty; input.value = current() ?? ''; }
+  });
+  input.addEventListener('change', () => {
+    delete input.dataset.dirty;
+    commit(input.value, () => { input.value = current(); });
+  });
+  return { element: input, set: (v) => { delete input.dataset.dirty; input.value = v ?? ''; } };
 }
 
 // Accent presets: the Dictation app's swatches, then any custom colour.
@@ -785,15 +835,29 @@ function handoffRules(scope) {
 const CHORD_WORDS = { '⌘': 'cmd command', '⌥': 'opt option alt', '⇧': 'shift', '⌃': 'ctrl control', '↩': 'return enter', '⎋': 'esc escape', '⌫': 'delete backspace', '\\': 'backslash', '/': 'slash', '←': 'left', '→': 'right', '↑': 'up', '↓': 'down', '⇥': 'tab' };
 const chordWords = (chord) => [...chord].map((c) => CHORD_WORDS[c] ?? c.toLowerCase()).join(' ');
 
+let refreshShortcuts = null;
+
 function shortcutsTable(scope) {
   const body = el('tbody');
-  state.keys.forEach((key) => {
-    const tr = el('tr', { tabindex: '-1' }, hl('td', key.title), hl('td', key.chord, { class: 'mono' }));
-    unit(tr, { text: searchable(key.title, key.command, key.chord, chordWords(key.chord)), scope: searchable(scope) });
-    body.append(tr);
-  });
+  let rowUnits = [];
+  const fill = () => {
+    for (const u of rowUnits) {
+      const i = units.indexOf(u);
+      if (i >= 0) units.splice(i, 1);
+    }
+    rowUnits = [];
+    body.replaceChildren();
+    state.keys.forEach((key) => {
+      const tr = el('tr', { tabindex: '-1' }, hl('td', key.title), hl('td', key.chord, { class: 'mono' }));
+      rowUnits.push(unit(tr, { text: searchable(key.title, key.command, key.chord, chordWords(key.chord)), scope: searchable(scope) }));
+      body.append(tr);
+    });
+  };
+  fill();
+  refreshShortcuts = () => { fill(); applyFilters(); };
   const head = el('div', { class: 'setting action-row', id: 'collection-shortcuts' },
-    el('div', { class: 'setting-text' }, hl('span', 'Custom shortcuts', { class: 'setting-label' })),
+    el('div', { class: 'setting-text' }, hl('span', 'Custom shortcuts', { class: 'setting-label' }),
+      hl('span', 'Edit keys.json to rebind or unbind shortcuts. Web apps that capture ⌘S keep it; use the fallback shortcut (default ⇧⌘L) there.', { class: 'setting-desc' })),
     el('div', { class: 'setting-control' }, reveal('keys')));
   unit(head, { text: searchable('custom shortcuts show keys keys.json edit bindings file'), scope: searchable(scope), header: true });
   return el('div', { class: 'collection' }, head,
@@ -1117,4 +1181,17 @@ async function load() {
 }
 
 bindChrome();
+onAnglEvent('theme', () => {
+  angl.call('theme.get', {}).then((reply) => {
+    if (!state.theme) return;
+    state.theme = reply.theme;
+    sync();
+  }).catch(() => {});
+});
+onAnglEvent('keys', () => {
+  angl.call('keys.list', {}).then((reply) => {
+    state.keys = reply.items ?? [];
+    refreshShortcuts?.();
+  }).catch(() => {});
+});
 load();

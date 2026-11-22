@@ -68,6 +68,11 @@ final class Passwords: NSObject {
         _ = NotificationCenter.default.addObserver(forName: .anglSettings, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { Passwords.shared.settingsChanged() }
         }
+        _ = NotificationCenter.default.addObserver(forName: .anglTheme, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated {
+                Passwords.shared.picker?.applyStyle(Browser.shared.style)
+            }
+        }
     }
 
     var settings: Settings.Passwords { Browser.shared.settings.passwords }
@@ -1068,10 +1073,8 @@ private final class PasswordPicker: NSPanel, NSTextFieldDelegate {
         isFloatingPanel = true
         becomesKeyOnlyIfNeeded = true
         hasShadow = true
-        isOpaque = true
-        backgroundColor = style.raised
         hidesOnDeactivate = true
-        contentView = list
+        applyPanelSurface(self, body: list, style: style)
         list.onPick = { [weak self] row in self?.onPick(row) }
         list.onArm = { [weak self] armed in self?.onArm(armed) }
         searchField.isBordered = false; searchField.drawsBackground = false; searchField.focusRingType = .none
@@ -1126,6 +1129,21 @@ private final class PasswordPicker: NSPanel, NSTextFieldDelegate {
         searchField.stringValue = ""
     }
 
+    func applyStyle(_ style: Style) {
+        let wasSearchFocused = searching && firstResponder === searchField.currentEditor()
+        let savedRange = wasSearchFocused ? searchField.currentEditor()?.selectedRange : nil
+        list.style = style
+        searchField.font = style.ui
+        searchField.textColor = style.primary
+        applyPanelSurface(self, body: list, style: style)
+        list.needsLayout = true
+        list.needsDisplay = true
+        if wasSearchFocused {
+            makeFirstResponder(searchField)
+            if let savedRange { searchField.currentEditor()?.selectedRange = savedRange }
+        }
+    }
+
     /// Below the field when it fits, else on the roomier side; the scrolling band shrinks to fit.
     private func place() {
         let screen = parent?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? field.insetBy(dx: -4000, dy: -4000)
@@ -1135,6 +1153,7 @@ private final class PasswordPicker: NSPanel, NSTextFieldDelegate {
         let y = size.height <= below || below >= above ? field.minY - size.height - 4 : field.maxY + 4
         let x = min(max(field.minX, screen.minX), screen.maxX - size.width)
         setFrame(NSRect(origin: NSPoint(x: x, y: y), size: size), display: true)
+        invalidateShadow()
     }
 
     func move(_ d: Int) { list.move(d) }
@@ -1161,7 +1180,7 @@ private final class PickerList: NSView {
     static let searchBand: CGFloat = 40
     /// The scrolling band's tallest: six logins and two headings.
     static let maxBand: CGFloat = 6 * 44 + 2 * 24
-    let style: Style
+    var style: Style
     var onPick: (Row) -> Void = { _ in }
     var onArm: (Bool) -> Void = { _ in }
     weak var searchField: NSTextField?
@@ -1351,15 +1370,24 @@ private final class PickerList: NSView {
     // MARK: Drawing
 
     override func draw(_ dirtyRect: NSRect) {
-        style.raised.setFill(); bounds.fill()
-        style.border.setStroke()
-        let edge = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5)); edge.lineWidth = 1; edge.stroke()
+        let rOuter = min(style.radius, min(bounds.width, bounds.height) / 2)
+        if !style.glass {
+            style.raised.setFill()
+            if rOuter > 0 { NSBezierPath(roundedRect: bounds, xRadius: rOuter, yRadius: rOuter).fill() } else { bounds.fill() }
+            style.border.setStroke()
+            let sr = max(0, rOuter - 0.5)
+            let edge = sr > 0
+                ? NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: sr, yRadius: sr)
+                : NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
+            edge.lineWidth = 1; edge.stroke()
+        }
         if searching {
             if let glass = style.symbol("magnifyingglass", size: 13, tint: style.secondary) {
                 glass.draw(in: NSRect(x: 19 - glass.size.width / 2, y: 1 + (Self.searchBand - glass.size.height) / 2,
                                       width: glass.size.width, height: glass.size.height))
             }
-            style.border.setFill(); NSRect(x: 1, y: 1 + Self.searchBand, width: bounds.width - 2, height: 1).fill()
+            (style.glass ? style.border.withAlphaComponent(0.5) : style.border).setFill()
+            NSRect(x: 1, y: 1 + Self.searchBand, width: bounds.width - 2, height: 1).fill()
         }
         if bandH > 0 {
             NSGraphicsContext.saveGraphicsState()
@@ -1374,7 +1402,10 @@ private final class PickerList: NSView {
             }
             NSGraphicsContext.restoreGraphicsState()
         }
-        if hairline { style.border.setFill(); NSRect(x: 1, y: footerTop - 1, width: bounds.width - 2, height: 1).fill() }
+        if hairline {
+            (style.glass ? style.border.withAlphaComponent(0.5) : style.border).setFill()
+            NSRect(x: style.radius > 0 ? 8 : 1, y: footerTop - 1, width: max(0, bounds.width - (style.radius > 0 ? 16 : 2)), height: 1).fill()
+        }
         for i in split..<rows.count { drawRow(i) }
     }
 
@@ -1400,10 +1431,9 @@ private final class PickerList: NSView {
     private func drawRow(_ i: Int) {
         let r = rowRect(i), row = rows[i]
         if i == selected {
-            style.selected.setFill(); r.fill()
-            style.accent.setFill(); NSRect(x: r.minX, y: r.minY, width: 2, height: r.height).fill()
+            fillRowPill(r, fill: style.selected, bar: style.accent, radius: style.smallRadius)
         } else if i == hovered {
-            style.selected.withAlphaComponent(0.55).setFill(); r.fill()
+            fillRowPill(r, fill: style.selected.withAlphaComponent(0.55), bar: nil, radius: style.smallRadius)
         }
         let textX = r.minX + 36, right = r.maxX - 12
         switch row {
@@ -1476,7 +1506,7 @@ private final class PickerList: NSView {
     /// for light ones), else the login's initial.
     private func drawIcon(_ e: Entry, in rect: NSRect) {
         let host = e.host.flatMap { $0.split(separator: ":").first.map(String.init) }
-        let tile = NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5)
+        let tile = style.smallRadius > 0 ? NSBezierPath(roundedRect: rect, xRadius: style.smallRadius, yRadius: style.smallRadius) : NSBezierPath(rect: rect)
         if let host, let icon = Tab.storedFavicon(for: URL(string: "https://" + host)) {
             (Self.isLight(icon) ? style.border : NSColor(white: 0.97, alpha: 1)).setFill()
             tile.fill()
